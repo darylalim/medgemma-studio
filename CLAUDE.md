@@ -2,7 +2,7 @@
 
 ## Project
 
-Streamlit app for medical image and text inference using Google's MedGemma 1.5 4B model in MLX format, running locally on Mac with Apple Silicon.
+**medgemma-pipeline** — Analyze medical text and images with the Google MedGemma 1.5 model on Apple Silicon with MLX.
 
 ## Commands
 

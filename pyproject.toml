@@ -1,7 +1,7 @@
 [project]
-name = "medgemma-app"
+name = "medgemma-pipeline"
 version = "0.1.0"
-description = "Medical image and text inference using MedGemma 1.5 4B with MLX"
+description = "Analyze medical text and images with the Google MedGemma 1.5 model on Apple Silicon with MLX."
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [

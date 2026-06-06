@@ -1,6 +1,6 @@
-# MedGemma App
+# MedGemma Pipeline
 
-Streamlit app for medical image and text inference using Google's [MedGemma](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) model in MLX format, running locally on Mac with Apple Silicon.
+Analyze medical text and images with the Google [MedGemma 1.5](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) model on Apple Silicon with MLX.
 
 ## Features
 
