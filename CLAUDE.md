@@ -27,7 +27,10 @@ Single-file app (`streamlit_app.py`) with the following structure:
 - **Main UI** — Single-column layout: text input, optional image uploader, always-visible system instruction and thinking toggle.
 - **Inference** — `main()` uses the helpers to build messages, format via `apply_chat_template`, call `generate()`, and parse the response.
 
-Tests in `tests/test_streamlit_app.py` cover the helper functions without Streamlit or model mocking.
+## Tests
+
+- `tests/test_streamlit_app.py` — pure helpers (`parse_response`, `build_messages`, `get_generation_params`); no Streamlit or model needed.
+- `tests/test_app_ui.py` — UI flow via `streamlit.testing.v1.AppTest`. Patch `mlx_vlm.*` (`load`, `load_config`, `apply_chat_template`, `generate`) at the source, not `streamlit_app`, since AppTest re-execs the script each run. Image-upload tests build a small in-memory PNG with Pillow.
 
 ## Constraints
 

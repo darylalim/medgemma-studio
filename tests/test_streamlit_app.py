@@ -1,6 +1,14 @@
+import pytest
 from PIL import Image
 
 from streamlit_app import build_messages, get_generation_params, parse_response
+
+THINKING_INSTRUCTION = "SYSTEM INSTRUCTION: think silently if needed. Be helpful."
+
+
+@pytest.fixture
+def sample_image():
+    return Image.new("RGB", (10, 10))
 
 
 class TestParseResponse:
@@ -36,9 +44,10 @@ class TestBuildMessages:
         assert msgs[1]["role"] == "user"
         assert msgs[1]["content"] == [{"type": "text", "text": "What is a fracture?"}]
 
-    def test_with_image(self):
-        img = Image.new("RGB", (10, 10))
-        msgs = build_messages("Describe this", "You are a radiologist.", image=img)
+    def test_with_image(self, sample_image):
+        msgs = build_messages(
+            "Describe this", "You are a radiologist.", image=sample_image
+        )
         assert len(msgs) == 2
         assert msgs[0]["content"] == "You are a radiologist."
         user_content = msgs[1]["content"]
@@ -48,34 +57,23 @@ class TestBuildMessages:
 
 
 class TestGetGenerationParams:
-    def test_thinking_mode(self):
+    @pytest.mark.parametrize(
+        "has_image, is_thinking, expected_instruction, expected_tokens",
+        [
+            (True, True, THINKING_INSTRUCTION, 1300),
+            (True, False, "Be helpful.", 300),
+            (False, False, "Be helpful.", 500),
+            (False, True, THINKING_INSTRUCTION, 1300),
+        ],
+        ids=["image+thinking", "image", "text", "text+thinking"],
+    )
+    def test_params(
+        self, has_image, is_thinking, expected_instruction, expected_tokens
+    ):
         instruction, tokens = get_generation_params(
-            has_image=True, is_thinking=True, system_instruction="Be helpful."
+            has_image=has_image,
+            is_thinking=is_thinking,
+            system_instruction="Be helpful.",
         )
-        assert (
-            instruction == "SYSTEM INSTRUCTION: think silently if needed. Be helpful."
-        )
-        assert tokens == 1300
-
-    def test_image_non_thinking(self):
-        instruction, tokens = get_generation_params(
-            has_image=True, is_thinking=False, system_instruction="Be helpful."
-        )
-        assert instruction == "Be helpful."
-        assert tokens == 300
-
-    def test_text_only_non_thinking(self):
-        instruction, tokens = get_generation_params(
-            has_image=False, is_thinking=False, system_instruction="Be helpful."
-        )
-        assert instruction == "Be helpful."
-        assert tokens == 500
-
-    def test_thinking_text_only(self):
-        instruction, tokens = get_generation_params(
-            has_image=False, is_thinking=True, system_instruction="Be helpful."
-        )
-        assert (
-            instruction == "SYSTEM INSTRUCTION: think silently if needed. Be helpful."
-        )
-        assert tokens == 1300
+        assert instruction == expected_instruction
+        assert tokens == expected_tokens
