@@ -9,6 +9,9 @@ load_dotenv()
 
 MODEL_ID = "mlx-community/medgemma-1.5-4b-it-bf16"
 
+DEFAULT_INSTRUCTION_IMAGE = "You are an expert radiologist."
+DEFAULT_INSTRUCTION_TEXT = "You are a helpful medical assistant."
+
 
 @st.cache_resource
 def load_model():
@@ -49,19 +52,18 @@ def get_generation_params(
     return system_instruction, max_new_tokens
 
 
-st.set_page_config(page_title="MedGemma", layout="wide")
+st.set_page_config(page_title="MedGemma Pipeline")
 
 
 def main():
-    st.title("MedGemma")
-    st.caption("Medical image and text analysis powered by MedGemma 1.5 4B")
+    st.title("MedGemma Pipeline")
 
     with st.spinner("Loading model..."):
         model, processor, config = load_model()
 
     prompt = st.text_input(
         "Enter your question", placeholder="e.g. Describe this X-ray"
-    )
+    ).strip()
 
     uploaded_image = None
     uploaded_file = st.file_uploader(
@@ -75,19 +77,30 @@ def main():
             st.error("Failed to load image. Please upload a valid image file.")
 
     default_instruction = (
-        "You are an expert radiologist."
+        DEFAULT_INSTRUCTION_IMAGE
         if uploaded_image is not None
-        else "You are a helpful medical assistant."
+        else DEFAULT_INSTRUCTION_TEXT
     )
-    with st.expander("Settings"):
-        is_thinking = st.toggle("Enable thinking", value=False)
-        system_instruction = st.text_area(
-            "System instruction", value=default_instruction, height=100
-        )
+    # Auto-switch the default only while the user has not edited the field, so a
+    # custom instruction survives uploading/removing an image. The keyed widget's
+    # state is otherwise decoupled from the changing default.
+    if not st.session_state.get("system_instruction_touched"):
+        st.session_state["system_instruction"] = default_instruction
 
-    generate_btn = st.button("Generate", type="primary", disabled=not prompt)
+    def _mark_touched():
+        st.session_state["system_instruction_touched"] = True
 
-    if generate_btn and prompt:
+    system_instruction = st.text_area(
+        "System instruction",
+        key="system_instruction",
+        height=100,
+        on_change=_mark_touched,
+    )
+    is_thinking = st.toggle("Thinking", value=False)
+
+    run_btn = st.button("Run", type="primary", disabled=not prompt)
+
+    if run_btn and prompt:
         has_image = uploaded_image is not None
         full_instruction, max_new_tokens = get_generation_params(
             has_image, is_thinking, system_instruction

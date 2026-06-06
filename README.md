@@ -5,7 +5,7 @@ Analyze medical text and images with the Google [MedGemma 1.5](https://huggingfa
 ## Features
 
 - Single-column UI with text input and optional image upload
-- Collapsible settings for thinking trace and system instruction
+- Always-visible system instruction and thinking toggle
 - System instruction auto-adjusts based on whether an image is attached
 - Fully local inference on Apple Silicon via MLX
 

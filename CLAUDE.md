@@ -24,7 +24,7 @@ Single-file app (`streamlit_app.py`) with the following structure:
   - `parse_response(response, is_thinking)` — splits `<unused94>`/`<unused95>` thinking trace from response
   - `build_messages(prompt, system_instruction, image)` — constructs chat message list for `apply_chat_template`
   - `get_generation_params(has_image, is_thinking, system_instruction)` — returns `(full_instruction, max_new_tokens)`
-- **Main UI** — Single-column layout: text input, optional image uploader, collapsible Settings expander (thinking toggle, system instruction).
+- **Main UI** — Single-column layout: text input, optional image uploader, always-visible system instruction and thinking toggle.
 - **Inference** — `main()` uses the helpers to build messages, format via `apply_chat_template`, call `generate()`, and parse the response.
 
 Tests in `tests/test_streamlit_app.py` cover the helper functions without Streamlit or model mocking.
