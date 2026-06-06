@@ -33,5 +33,5 @@ Tests in `tests/test_streamlit_app.py` cover the helper functions without Stream
 
 - **No multi-turn chat** — single Q&A per interaction
 - **Package management** — uv (`pyproject.toml` + `uv.lock`); no `requirements.txt`
-- **HF token** — loaded from `.env` via `python-dotenv`; required for gated model download
+- **HF token** — optional; loaded from `.env` via `python-dotenv`. The MLX model repo is ungated, so a token only helps avoid download rate limits
 - **Streamlit API** — use `width="stretch"` (not deprecated `use_container_width`)

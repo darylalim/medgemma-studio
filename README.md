@@ -16,13 +16,14 @@ Requires:
 - Mac with Apple Silicon
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
-- [Hugging Face](https://huggingface.co/) token with access to [`google/medgemma-1.5-4b-it`](https://huggingface.co/google/medgemma-1.5-4b-it)
+
+The model ([`mlx-community/medgemma-1.5-4b-it-bf16`](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16)) downloads from Hugging Face on first run. The repo is ungated, so no token is required.
 
 ```bash
 uv sync
 ```
 
-Create a `.env` file:
+Optionally, create a `.env` file with a Hugging Face token to avoid download rate limits:
 
 ```
 HF_TOKEN=your_token_here
