@@ -7,6 +7,7 @@ Analyze medical text and images with the Google [MedGemma 1.5](https://huggingfa
 - Single-column UI with text input and optional image upload
 - Always-visible system instruction and thinking toggle
 - System instruction auto-adjusts based on whether an image is attached
+- Optional "Locate anatomy" mode that draws labeled bounding boxes on the image
 - Fully local inference on Apple Silicon via MLX
 
 ## Setup
@@ -34,6 +35,8 @@ HF_TOKEN=your_token_here
 ```bash
 uv run streamlit run streamlit_app.py
 ```
+
+To locate anatomy, upload an image, enable **Locate anatomy**, enter a query (e.g. "Where is the right clavicle?"), and run. The app draws labeled bounding boxes; this mode uses a built-in localization prompt and ignores the system instruction.
 
 ## Development
 

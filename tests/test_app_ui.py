@@ -78,7 +78,20 @@ def test_settings_always_visible(app):
     # Settings were moved out of an expander; nothing is collapsed on first render.
     assert len(app.expander) == 0
     assert len(app.text_area) == 1  # system instruction
-    assert len(app.toggle) == 1  # thinking toggle
+    assert len(app.toggle) == 2  # thinking + localization toggles
+
+
+def test_localization_toggle_disabled_without_image(app):
+    assert app.toggle[1].label == "Locate anatomy (bounding boxes)"
+    assert app.toggle[1].disabled is True
+
+
+def test_localization_caption_discloses_override(app, png_bytes):
+    # No disclosure caption until localization is actually active.
+    assert not any("ignored in this mode" in c.value for c in app.caption)
+    app.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
+    app.toggle[1].set_value(True).run()
+    assert any("ignored in this mode" in c.value for c in app.caption)
 
 
 def test_response_renders(app):
@@ -176,3 +189,90 @@ def test_image_inference_passes_image_to_model(patched_mlx, monkeypatch, png_byt
     img_arg = captured["gen_args"][3]  # 4th positional arg to generate
     assert isinstance(img_arg, list) and img_arg
     assert "No acute findings." in [m.value for m in at.markdown]
+
+
+def test_localization_lists_detected_structures(patched_mlx, png_bytes):
+    patched_mlx.text = (
+        '```json\n[{"box_2d": [100, 100, 500, 500], "label": "right clavicle"}]\n```'
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input[0].set_value("Where is the right clavicle?").run()
+    at.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
+    at.toggle[1].set_value(True).run()  # enable localization (now that an image exists)
+    at.button[0].click().run()
+    assert not at.exception
+    markdowns = [m.value for m in at.markdown]
+    assert "### Detected structures" in markdowns
+    assert any("right clavicle" in m for m in markdowns)
+    assert "### Response" not in markdowns  # localization replaces the text view
+
+
+def test_localization_passes_square_image_to_model(patched_mlx, monkeypatch, png_bytes):
+    captured = {}
+    out = MagicMock()
+    out.text = '```json\n[{"box_2d": [0, 0, 1000, 1000], "label": "frame"}]\n```'
+    monkeypatch.setattr(
+        "mlx_vlm.generate",
+        lambda *a, **k: captured.update(gen_args=a) or out,
+    )
+    # A non-square PNG so padding is observable.
+    buf = io.BytesIO()
+    Image.new("RGB", (20, 10)).save(buf, format="PNG")
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input[0].set_value("Localize the frame").run()
+    at.file_uploader[0].upload("wide.png", buf.getvalue(), "image/png").run()
+    at.toggle[1].set_value(True).run()
+    at.button[0].click().run()
+    assert not at.exception
+    sent_image = captured["gen_args"][3][0]  # the single image passed to generate
+    assert sent_image.size == (20, 20)  # padded to a square
+
+
+def test_localization_no_boxes_warns(patched_mlx, png_bytes):
+    patched_mlx.text = "I could not localize that structure."
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input[0].set_value("Where is the spine?").run()
+    at.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
+    at.toggle[1].set_value(True).run()
+    at.button[0].click().run()
+    assert not at.exception
+    assert at.warning[0].value == "No bounding boxes were returned."
+
+
+def test_localization_with_thinking_renders_both(patched_mlx, png_bytes):
+    # Thinking + localization together: the trace is stripped before parse_boxes,
+    # and both the trace and the detected-structures list render.
+    patched_mlx.text = (
+        "<unused94>thought\nReasoning about anatomy.<unused95>"
+        '```json\n[{"box_2d": [100, 100, 500, 500], "label": "bone"}]\n```'
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input[0].set_value("Locate the bone").run()
+    at.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
+    at.toggle[0].set_value(True).run()  # thinking
+    at.toggle[1].set_value(True).run()  # localization
+    at.button[0].click().run()
+    assert not at.exception
+    markdowns = [m.value for m in at.markdown]
+    assert "Reasoning about anatomy." in markdowns  # thinking trace
+    assert "### Detected structures" in markdowns
+    assert any("bone" in m for m in markdowns)
+
+
+def test_localization_renders_full_frame_box(patched_mlx, png_bytes):
+    # A degenerate full-frame box is the model's "not here" fallback (e.g. asking
+    # for a femur on a chest X-ray). By design it is treated as a normal detection,
+    # not filtered out — the app renders what the model returns.
+    patched_mlx.text = (
+        '```json\n[{"box_2d": [0, 0, 1000, 1000], "label": "femur"}]\n```'
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input[0].set_value("Where is the femur?").run()
+    at.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
+    at.toggle[1].set_value(True).run()
+    at.button[0].click().run()
+    assert not at.exception
+    markdowns = [m.value for m in at.markdown]
+    assert "### Detected structures" in markdowns
+    assert any("femur" in m for m in markdowns)
+    assert not at.warning  # a full-frame box is a detection, not a "no boxes" case
