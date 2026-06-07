@@ -12,8 +12,15 @@ load_dotenv()
 
 MODEL_ID = "mlx-community/medgemma-1.5-4b-it-bf16"
 
+IMAGE_TYPES = ["png", "jpg", "jpeg", "webp"]
+
 DEFAULT_INSTRUCTION_IMAGE = "You are an expert radiologist."
 DEFAULT_INSTRUCTION_TEXT = "You are a helpful medical assistant."
+DEFAULT_INSTRUCTION_COMPARE = (
+    "You are an expert radiologist comparing two medical images, such as "
+    "longitudinal studies of the same patient. Describe the key differences and "
+    "changes between the first and second image."
+)
 
 LOCALIZATION_INSTRUCTION = (
     "You are an expert radiologist localizing anatomy on a medical image. "
@@ -40,10 +47,17 @@ def parse_response(response: str, is_thinking: bool) -> tuple[str | None, str]:
 
 
 def build_messages(
-    prompt: str, system_instruction: str, image: Image.Image | None
+    prompt: str,
+    system_instruction: str,
+    images: list[Image.Image] | None = None,
+    image_labels: list[str] | None = None,
 ) -> list:
     user_content: list[dict] = [{"type": "text", "text": prompt}]
-    if image is not None:
+    for i, _ in enumerate(images or []):
+        # Anchor each image with a label (e.g. "First image:") when provided, so a
+        # prompt that says "first/second image" binds to a specific image.
+        if image_labels and i < len(image_labels):
+            user_content.append({"type": "text", "text": image_labels[i]})
         user_content.append({"type": "image"})
     return [
         {"role": "system", "content": system_instruction},
@@ -56,14 +70,21 @@ def get_generation_params(
     is_thinking: bool,
     system_instruction: str,
     is_localizing: bool = False,
+    is_comparing: bool = False,
 ) -> tuple[str, int]:
     if is_localizing:
         return LOCALIZATION_INSTRUCTION, 1300 if is_thinking else 1000
     if is_thinking:
+        # Thinking while comparing two images needs room for the trace AND a
+        # two-image answer, so it gets more than the single-image thinking budget.
         return (
             f"SYSTEM INSTRUCTION: think silently if needed. {system_instruction}",
-            1300,
+            1600 if is_comparing else 1300,
         )
+    if is_comparing:
+        # Comparing two images needs more room than a single-image answer; the
+        # editable system instruction (a comparison persona) is kept as-is.
+        return system_instruction, 600
     max_new_tokens = 300 if has_image else 500
     return system_instruction, max_new_tokens
 
@@ -144,6 +165,23 @@ def show_response(response: str) -> None:
     st.markdown(response)
 
 
+def load_and_preview_image(uploaded_file, caption: str) -> Image.Image | None:
+    """Open an uploaded file as an image and preview it under ``caption``.
+
+    Returns the PIL image, or None if no file was provided or it failed to load
+    (in which case an error is shown).
+    """
+    if uploaded_file is None:
+        return None
+    try:
+        image = Image.open(uploaded_file)
+        st.image(image, caption=caption, width="stretch")
+        return image
+    except Exception:
+        st.error("Failed to load image. Please upload a valid image file.")
+        return None
+
+
 st.set_page_config(page_title="MedGemma Pipeline")
 
 
@@ -157,22 +195,35 @@ def main():
         "Enter your question", placeholder="e.g. Describe this X-ray"
     ).strip()
 
-    uploaded_image = None
-    uploaded_file = st.file_uploader(
-        "Upload a medical image (optional)", type=["png", "jpg", "jpeg", "webp"]
+    image1 = load_and_preview_image(
+        st.file_uploader(
+            "Upload a medical image (optional)",
+            type=IMAGE_TYPES,
+        ),
+        caption="Uploaded image",
     )
-    if uploaded_file is not None:
-        try:
-            uploaded_image = Image.open(uploaded_file)
-            st.image(uploaded_image, caption="Uploaded image", width="stretch")
-        except Exception:
-            st.error("Failed to load image. Please upload a valid image file.")
+    # Offer a second slot only once the first image exists, so the model can
+    # compare two studies (e.g. longitudinal CXR) in a single prompt.
+    image2 = None
+    if image1 is not None:
+        image2 = load_and_preview_image(
+            st.file_uploader(
+                "Upload a second image to compare (optional)",
+                type=IMAGE_TYPES,
+            ),
+            caption="Second image",
+        )
 
-    default_instruction = (
-        DEFAULT_INSTRUCTION_IMAGE
-        if uploaded_image is not None
-        else DEFAULT_INSTRUCTION_TEXT
-    )
+    images = [img for img in (image1, image2) if img is not None]
+    has_image = len(images) >= 1
+    is_comparing = len(images) == 2
+
+    if is_comparing:
+        default_instruction = DEFAULT_INSTRUCTION_COMPARE
+    elif has_image:
+        default_instruction = DEFAULT_INSTRUCTION_IMAGE
+    else:
+        default_instruction = DEFAULT_INSTRUCTION_TEXT
     # Auto-switch the default only while the user has not edited the field, so a
     # custom instruction survives uploading/removing an image. The keyed widget's
     # state is otherwise decoupled from the changing default.
@@ -192,36 +243,47 @@ def main():
     is_localizing = st.toggle(
         "Locate anatomy (bounding boxes)",
         value=False,
-        disabled=uploaded_image is None,
-        help="Outline anatomy on the image with bounding boxes. Requires an image.",
+        disabled=len(images) != 1,
+        help="Outline anatomy with bounding boxes. Requires a single image.",
     )
-    if is_localizing and uploaded_image is not None:
+    if is_localizing and len(images) == 1:
         st.caption(
             "ℹ️ Localization uses a built-in prompt; the System instruction above "
             "is ignored in this mode."
         )
+    elif is_comparing:
+        st.caption("ℹ️ Comparison mode: both images are sent to the model together.")
 
     run_btn = st.button("Run", type="primary", disabled=not prompt)
 
     if run_btn and prompt:
-        has_image = uploaded_image is not None
-        localize = is_localizing and has_image
+        # Localization is single-image only; with two images it is unavailable.
+        localize = is_localizing and len(images) == 1
         localize_size: tuple[int, int] | None = None
         full_instruction, max_new_tokens = get_generation_params(
-            has_image, is_thinking, system_instruction, is_localizing=localize
+            has_image,
+            is_thinking,
+            system_instruction,
+            is_localizing=localize,
+            is_comparing=is_comparing,
         )
 
-        if localize and uploaded_image is not None:
+        if localize:
             # Pad to a square so the model's [0, 1000] coordinates map back without
             # an offset, then crop the annotated result to the original size.
-            localize_size = uploaded_image.size
-            model_image = pad_to_square(uploaded_image)
+            localize_size = images[0].size
+            model_images = [pad_to_square(images[0])]
         else:
-            model_image = uploaded_image
+            model_images = images
 
-        messages = build_messages(prompt, full_instruction, model_image)
-        image_for_model = [model_image] if model_image is not None else None
-        num_images = 1 if image_for_model else 0
+        # Label the two studies so the comparison persona's "first/second image"
+        # wording binds to a specific image regardless of attention ordering.
+        image_labels = ["First image:", "Second image:"] if is_comparing else None
+        messages = build_messages(
+            prompt, full_instruction, model_images, image_labels=image_labels
+        )
+        image_for_model = model_images or None
+        num_images = len(model_images)
         with st.spinner("Generating response..."):
             try:
                 formatted_prompt = apply_chat_template(
@@ -248,11 +310,13 @@ def main():
 
         if localize:
             boxes = parse_boxes(response)
-            # localize_size/model_image are always set when localize is True; the
-            # explicit checks also narrow them from Optional for the type checker.
-            if boxes and localize_size is not None and model_image is not None:
+            # localize_size is always set when localize is True; the explicit check
+            # also narrows it from Optional for the type checker.
+            if boxes and localize_size is not None:
                 width, height = localize_size
-                annotated = draw_boxes(model_image, boxes).crop((0, 0, width, height))
+                annotated = draw_boxes(model_images[0], boxes).crop(
+                    (0, 0, width, height)
+                )
                 st.image(annotated, caption="Localized anatomy", width="stretch")
                 st.markdown("### Detected structures")
                 st.markdown(

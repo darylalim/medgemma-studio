@@ -6,8 +6,9 @@ Analyze medical text and images with the Google [MedGemma 1.5](https://huggingfa
 
 - Single-column UI with text input and optional image upload
 - Always-visible system instruction and thinking toggle
-- System instruction auto-adjusts based on whether an image is attached
+- System instruction auto-adjusts based on whether one image, two images, or no image is attached
 - Optional "Locate anatomy" mode that draws labeled bounding boxes on the image
+- Longitudinal comparison: attach a second image to compare two studies in one prompt
 - Fully local inference on Apple Silicon via MLX
 
 ## Setup
@@ -37,6 +38,8 @@ uv run streamlit run streamlit_app.py
 ```
 
 To locate anatomy, upload an image, enable **Locate anatomy**, enter a query (e.g. "Where is the right clavicle?"), and run. The app draws labeled bounding boxes; this mode uses a built-in localization prompt and ignores the system instruction.
+
+To compare two studies (e.g. a longitudinal chest X-ray), upload a first image, then upload a second image in the slot that appears. The app enters comparison mode automatically, sends both images in one prompt, and asks the model to describe the changes. (Localization is single-image only and is disabled when two images are attached.)
 
 ## Development
 

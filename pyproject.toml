@@ -1,6 +1,6 @@
 [project]
 name = "medgemma-pipeline"
-version = "0.2.0"
+version = "0.3.0"
 description = "Analyze medical text and images with the Google MedGemma 1.5 model on Apple Silicon with MLX."
 readme = "README.md"
 requires-python = "==3.12.*"

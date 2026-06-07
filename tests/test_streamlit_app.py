@@ -46,7 +46,7 @@ class TestParseResponse:
 
 class TestBuildMessages:
     def test_text_only(self):
-        msgs = build_messages("What is a fracture?", "You are a doctor.", image=None)
+        msgs = build_messages("What is a fracture?", "You are a doctor.", images=None)
         assert len(msgs) == 2
         assert msgs[0]["role"] == "system"
         assert msgs[0]["content"] == "You are a doctor."
@@ -55,7 +55,7 @@ class TestBuildMessages:
 
     def test_with_image(self, sample_image):
         msgs = build_messages(
-            "Describe this", "You are a radiologist.", image=sample_image
+            "Describe this", "You are a radiologist.", images=[sample_image]
         )
         assert len(msgs) == 2
         assert msgs[0]["content"] == "You are a radiologist."
@@ -63,6 +63,40 @@ class TestBuildMessages:
         assert len(user_content) == 2
         assert user_content[0] == {"type": "text", "text": "Describe this"}
         assert user_content[1] == {"type": "image"}
+
+    def test_with_two_images(self, sample_image):
+        # One image placeholder per image, appended after the text, for comparison.
+        msgs = build_messages(
+            "Compare these",
+            "You are a radiologist.",
+            images=[sample_image, sample_image],
+        )
+        user_content = msgs[1]["content"]
+        assert len(user_content) == 3
+        assert user_content[0] == {"type": "text", "text": "Compare these"}
+        assert user_content[1] == {"type": "image"}
+        assert user_content[2] == {"type": "image"}
+
+    def test_empty_image_list(self):
+        # An empty list behaves like no image (no placeholder appended).
+        msgs = build_messages("Hello", "You are a doctor.", images=[])
+        assert msgs[1]["content"] == [{"type": "text", "text": "Hello"}]
+
+    def test_with_image_labels(self, sample_image):
+        # Labels are interleaved as text parts before each image (comparison mode).
+        msgs = build_messages(
+            "Compare these",
+            "You are a radiologist.",
+            images=[sample_image, sample_image],
+            image_labels=["First image:", "Second image:"],
+        )
+        assert msgs[1]["content"] == [
+            {"type": "text", "text": "Compare these"},
+            {"type": "text", "text": "First image:"},
+            {"type": "image"},
+            {"type": "text", "text": "Second image:"},
+            {"type": "image"},
+        ]
 
 
 class TestGetGenerationParams:
@@ -100,6 +134,49 @@ class TestGetGenerationParams:
             is_localizing=True,
         )
         # Localization ignores the user's persona and uses the dedicated prompt.
+        assert instruction == LOCALIZATION_INSTRUCTION
+        assert tokens == expected_tokens
+
+    @pytest.mark.parametrize(
+        "is_thinking, expected_instruction, expected_tokens",
+        [
+            (False, "Be helpful.", 600),
+            (True, THINKING_INSTRUCTION, 1600),
+        ],
+        ids=["compare", "compare+thinking"],
+    )
+    def test_comparison_params(
+        self, is_thinking, expected_instruction, expected_tokens
+    ):
+        instruction, tokens = get_generation_params(
+            has_image=True,
+            is_thinking=is_thinking,
+            system_instruction="Be helpful.",
+            is_comparing=True,
+        )
+        # Comparison keeps the editable instruction but allocates a larger budget;
+        # thinking still takes precedence over the comparison branch.
+        assert instruction == expected_instruction
+        assert tokens == expected_tokens
+
+    @pytest.mark.parametrize(
+        "is_thinking, expected_tokens",
+        [(False, 1000), (True, 1300)],
+        ids=["localize+compare", "localize+compare+thinking"],
+    )
+    def test_localization_takes_precedence_over_comparison(
+        self, is_thinking, expected_tokens
+    ):
+        # Branch order is localizing > thinking > comparing: with both flags set,
+        # localization wins and the comparison persona/budget is never reached. (The
+        # UI call site is mutually exclusive, so this pins the helper's contract.)
+        instruction, tokens = get_generation_params(
+            has_image=True,
+            is_thinking=is_thinking,
+            system_instruction="Be helpful.",
+            is_localizing=True,
+            is_comparing=True,
+        )
         assert instruction == LOCALIZATION_INSTRUCTION
         assert tokens == expected_tokens
 
