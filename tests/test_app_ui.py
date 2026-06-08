@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 from PIL import Image
 from streamlit.testing.v1 import AppTest
@@ -12,6 +13,7 @@ from streamlit_app import (
     DEFAULT_INSTRUCTION_CT,
     DEFAULT_INSTRUCTION_IMAGE,
     DEFAULT_INSTRUCTION_TEXT,
+    DEFAULT_INSTRUCTION_WSI,
     REPETITION_CONTEXT_SIZE,
     REPETITION_PENALTY,
 )
@@ -80,6 +82,49 @@ def _upload_ct_pair(at):
     ).upload("b.dcm", _dicom_bytes(1, 100), "application/dicom").run()
 
 
+class _FakeSlide:
+    """OpenSlide stand-in for the WSI tab tests; a saturated thumbnail reads as all
+    tissue, so a 3000x3000 single level yields a 3x3 grid of nine patches."""
+
+    def __init__(
+        self,
+        properties=None,
+        thumbnail=None,
+        level_dimensions=((3000, 3000),),
+        level_downsamples=(1.0,),
+    ):
+        self.level_dimensions = list(level_dimensions)
+        self.level_downsamples = list(level_downsamples)
+        self.dimensions = self.level_dimensions[0]
+        self.properties = properties or {"openslide.objective-power": "40"}
+        self._thumbnail = thumbnail
+
+    def get_thumbnail(self, size):
+        if self._thumbnail is not None:
+            return self._thumbnail
+        arr = np.zeros((800, 800, 3), dtype=np.uint8)
+        arr[..., 0], arr[..., 2] = 150, 140
+        return Image.fromarray(arr, "RGB")
+
+    def read_region(self, location, level, size):
+        return Image.new("RGBA", size, (150, 40, 140, 255))
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def patched_openslide(monkeypatch):
+    """Replace OpenSlide with a fake slide that yields a tissue-filled 3x3 grid."""
+    monkeypatch.setattr("openslide.OpenSlide", lambda path: _FakeSlide())
+
+
+def _upload_slide(at, data=b"slide"):
+    at.file_uploader(key="wsi_files").upload(
+        "slide.svs", data, "application/octet-stream"
+    ).run()
+
+
 # --------------------------------------------------------------------------- #
 # Layout / shared
 # --------------------------------------------------------------------------- #
@@ -90,8 +135,13 @@ def test_title_renders(app):
     assert app.title[0].value == "MedGemma Pipeline"
 
 
-def test_three_tabs_render(app):
-    assert [t.label for t in app.tabs] == ["Ask", "Chest X-ray", "Computed Tomography"]
+def test_four_tabs_render(app):
+    assert [t.label for t in app.tabs] == [
+        "Ask",
+        "Chest X-ray",
+        "Computed Tomography",
+        "Pathology (WSI)",
+    ]
 
 
 def test_no_expander_on_first_render(app):
@@ -105,14 +155,16 @@ def test_each_tab_has_independent_settings(app):
         "ask_instruction",
         "cxr_instruction",
         "ct_instruction",
+        "wsi_instruction",
     ]
     assert {w.key for w in app.toggle} == {
         "ask_thinking",
         "cxr_thinking",
         "cxr_localize",
         "ct_thinking",
+        "wsi_thinking",
     }
-    assert [w.key for w in app.button] == ["ask_run", "cxr_run", "ct_run"]
+    assert [w.key for w in app.button] == ["ask_run", "cxr_run", "ct_run", "wsi_run"]
 
 
 def test_thinking_toggles_are_independent(app):
@@ -785,3 +837,214 @@ def test_ct_multi_frame_shows_error_not_crash(patched_mlx):
     at.button(key="ct_run").click().run()
     assert not at.exception
     assert any("single-frame" in e.value for e in at.error)
+
+
+# --------------------------------------------------------------------------- #
+# Pathology (WSI) tab (slide -> tissue patches -> multi-image)
+# --------------------------------------------------------------------------- #
+
+
+def test_wsi_default_instruction_is_pathology_persona(app):
+    assert app.text_area(key="wsi_instruction").value == DEFAULT_INSTRUCTION_WSI
+
+
+def test_wsi_caption_describes_slide_upload(app):
+    assert any("whole-slide" in c.value for c in app.caption)
+
+
+def test_wsi_run_requires_prompt_and_file(app):
+    assert app.button(key="wsi_run").disabled is True
+    app.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    assert app.button(key="wsi_run").disabled is True  # prompt but no slide
+    app.file_uploader(key="wsi_files").upload(
+        "slide.svs", b"x", "application/octet-stream"
+    ).run()
+    assert app.button(key="wsi_run").disabled is False
+
+
+def test_wsi_inference_passes_patches(patched_mlx, patched_openslide, monkeypatch):
+    _force_ram_gib(monkeypatch, 32)  # deterministic slider range (max 16)
+    captured = {}
+    monkeypatch.setattr(
+        "mlx_vlm.prompt_utils.apply_chat_template",
+        lambda *a, **k: captured.update(act_kwargs=k) or "prompt",
+    )
+    out = MagicMock()
+    out.text = "Moderately differentiated adenocarcinoma."
+    monkeypatch.setattr(
+        "mlx_vlm.generate",
+        lambda *a, **k: captured.update(gen_args=a, gen_kwargs=k) or out,
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.slider(key="wsi_patches").set_value(4).run()
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    assert captured["act_kwargs"]["num_images"] == 4
+    img_arg = captured["gen_args"][3]
+    assert isinstance(img_arg, list) and len(img_arg) == 4
+    assert all(im.mode == "RGB" for im in img_arg)  # patches read as RGB
+    assert captured["gen_kwargs"]["max_tokens"] == 2000  # WSI multi-patch budget
+    # The loop-guard penalty must reach the long multi-patch read.
+    assert captured["gen_kwargs"]["repetition_penalty"] == REPETITION_PENALTY
+    assert captured["gen_kwargs"]["repetition_context_size"] == REPETITION_CONTEXT_SIZE
+    assert "Moderately differentiated adenocarcinoma." in [m.value for m in at.markdown]
+
+
+def test_wsi_labels_patches_in_prompt(patched_mlx, patched_openslide, monkeypatch):
+    _force_ram_gib(monkeypatch, 32)
+    captured = {}
+    monkeypatch.setattr(
+        "mlx_vlm.prompt_utils.apply_chat_template",
+        lambda *a, **k: captured.update(args=a) or "prompt",
+    )
+    out = MagicMock()
+    out.text = "Findings."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.slider(key="wsi_patches").set_value(3).run()
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    messages = captured["args"][2]
+    user_texts = [p["text"] for p in messages[1]["content"] if p["type"] == "text"]
+    assert "PATCH 1" in user_texts
+    assert "PATCH 3" in user_texts
+
+
+def test_wsi_subsamples_to_slider_count(patched_mlx, patched_openslide, monkeypatch):
+    # Nine tissue patches in the grid; the slider (not the grid size) sets how many
+    # reach the model.
+    _force_ram_gib(monkeypatch, 32)
+    captured = {}
+    monkeypatch.setattr(
+        "mlx_vlm.prompt_utils.apply_chat_template",
+        lambda *a, **k: captured.update(act_kwargs=k) or "prompt",
+    )
+    out = MagicMock()
+    out.text = "Findings."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.slider(key="wsi_patches").set_value(6).run()
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    assert captured["act_kwargs"]["num_images"] == 6
+
+
+def test_wsi_caption_discloses_actual_magnification(
+    patched_mlx, patched_openslide, monkeypatch
+):
+    _force_ram_gib(monkeypatch, 32)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    # A 10x request on a single-level 40x slide is honestly disclosed as ~40x.
+    assert any("sampled at ~40.0x" in c.value for c in at.caption)
+
+
+def test_wsi_with_thinking_uses_larger_budget(
+    patched_mlx, patched_openslide, monkeypatch
+):
+    _force_ram_gib(monkeypatch, 32)
+    captured = {}
+    patched_mlx.text = (
+        "<unused94>thought\nReviewing each patch.<unused95>No malignancy seen."
+    )
+    monkeypatch.setattr(
+        "mlx_vlm.generate",
+        lambda *a, **k: captured.update(gen_kwargs=k) or patched_mlx,
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Any malignancy?").run()
+    _upload_slide(at)
+    at.toggle(key="wsi_thinking").set_value(True).run()
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    assert captured["gen_kwargs"]["max_tokens"] == 2500  # thinking + WSI budget
+    assert len(at.expander) == 1  # thinking trace
+    markdowns = [m.value for m in at.markdown]
+    assert "Reviewing each patch." in markdowns
+    assert "No malignancy seen." in markdowns
+
+
+def test_wsi_invalid_slide_shows_error(patched_mlx, monkeypatch):
+    def _boom(path):
+        raise OSError("not a slide")
+
+    monkeypatch.setattr("openslide.OpenSlide", _boom)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe").run()
+    _upload_slide(at)
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    assert any("Failed to read slide" in e.value for e in at.error)
+    assert "### Response" not in [m.value for m in at.markdown]
+
+
+def test_wsi_no_tissue_shows_error(patched_mlx, monkeypatch):
+    white = Image.new("RGB", (800, 800), (255, 255, 255))
+    monkeypatch.setattr("openslide.OpenSlide", lambda path: _FakeSlide(thumbnail=white))
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe").run()
+    _upload_slide(at)
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    assert any("No tissue" in e.value for e in at.error)
+    assert "### Response" not in [m.value for m in at.markdown]
+
+
+def test_wsi_magnification_selects_pyramid_level(patched_mlx, monkeypatch):
+    # Requesting 10x on a 40x two-level slide must pick level 1 (downsample 4) and
+    # disclose ~10.0x -> verifies the magnification slider actually switches levels
+    # (the single-level fakes elsewhere never exercise this).
+    _force_ram_gib(monkeypatch, 32)
+    slide = _FakeSlide(
+        level_dimensions=((8000, 8000), (2000, 2000)),
+        level_downsamples=(1.0, 4.0),
+    )
+    monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
+    out = MagicMock()
+    out.text = "Findings."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.select_slider(key="wsi_mag").set_value(10).run()
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    assert any("~10.0x" in c.value for c in at.caption)
+
+
+def test_wsi_sparse_tissue_reduces_patch_count(patched_mlx, monkeypatch):
+    # Tissue only on the left third -> the nine-tile grid is filtered to three
+    # patches, even though eight were requested. Mirrors the live run on the CMU-1
+    # slide (8 requested, 3 tissue patches sampled, caption "3 patches sampled").
+    _force_ram_gib(monkeypatch, 32)
+    thumb = np.full((800, 800, 3), 255, dtype=np.uint8)
+    thumb[:, :250, 0], thumb[:, :250, 2] = 150, 140
+    monkeypatch.setattr(
+        "openslide.OpenSlide",
+        lambda path: _FakeSlide(thumbnail=Image.fromarray(thumb, "RGB")),
+    )
+    captured = {}
+    monkeypatch.setattr(
+        "mlx_vlm.prompt_utils.apply_chat_template",
+        lambda *a, **k: captured.update(act_kwargs=k) or "prompt",
+    )
+    out = MagicMock()
+    out.text = "Findings."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.slider(key="wsi_patches").set_value(8).run()  # request 8, only 3 qualify
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    assert captured["act_kwargs"]["num_images"] == 3
+    assert any("3 patches sampled" in c.value for c in at.caption)

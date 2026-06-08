@@ -1,14 +1,15 @@
 # MedGemma Pipeline
 
-Analyze medical text, 2D images (e.g. chest X-ray), and 3D CT volumes with the Google [MedGemma 1.5](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) model on Apple Silicon with MLX.
+Analyze medical text, 2D images (e.g. chest X-ray), 3D CT volumes, and whole-slide pathology images with the Google [MedGemma 1.5](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) model on Apple Silicon with MLX.
 
 ## Features
 
-- Three tabs, each with its own system instruction and thinking toggle:
+- Four tabs, each with its own system instruction and thinking toggle:
   - **Ask** — text-only medical Q&A
   - **Chest X-ray** — analyze one image, compare two studies (longitudinal), or draw labeled anatomy bounding boxes ("Locate anatomy")
   - **Computed Tomography** — upload a DICOM series; each slice is windowed into MedGemma's trained false-color (Hounsfield-unit) representation and read as a stack
-- RAM-aware CT slice cap (multi-image inference is memory-heavy on unified memory)
+  - **Pathology (WSI)** — upload a whole-slide image (`.svs`/`.ndpi`/`.tiff`); tissue patches are sampled at a chosen magnification and read as the 896px tiles MedGemma is trained on
+- RAM-aware cap on CT slices / WSI patches (multi-image inference is memory-heavy on unified memory)
 - Fully local inference on Apple Silicon via MLX
 
 ## Setup
@@ -37,11 +38,12 @@ HF_TOKEN=your_token_here
 uv run streamlit run streamlit_app.py
 ```
 
-The app opens with three tabs:
+The app opens with four tabs:
 
 - **Ask** — enter a question and run for a text-only answer.
 - **Chest X-ray** — upload an image and run for analysis. To **locate anatomy**, enable the toggle and ask e.g. *"Where is the right clavicle?"*; the app draws labeled bounding boxes (this mode uses a built-in prompt and ignores the system instruction). To **compare** two studies, upload a first image, then a second in the slot that appears — the app sends both in one prompt and describes the changes. (Localization is single-image only and is disabled with two images.)
 - **Computed Tomography** — upload a CT series as individual DICOM (`.dcm`) slice files (multi-select), choose how many slices to analyze, enter a question, and run. Each slice is windowed into a false-color image before analysis.
+- **Pathology (WSI)** — upload a whole-slide image (`.svs`/`.ndpi`/`.tiff`), pick a magnification (5/10/20/40×) and how many tissue patches to analyze, enter a question, and run. A tissue-overview overlay (sampled patches outlined) and a sample patch are shown, with the actual magnification disclosed (clamped to the slide's available pyramid levels).
 
 ## Development
 

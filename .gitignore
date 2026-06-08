@@ -16,9 +16,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# Local test data: chest X-rays in samples/cxr/ (comparison / Locate-anatomy) and
-# a CT DICOM series in samples/ct/. Keep the directory's README so the test assets
-# stay self-describing.
+# Local test data: chest X-rays in samples/cxr/ (comparison / Locate-anatomy), a CT
+# DICOM series in samples/ct/, and a whole-slide image in samples/wsi/. Keep the
+# directory's README so the test assets stay self-describing.
 samples/*
 !samples/README.md
 

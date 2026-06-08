@@ -2,10 +2,12 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Iterable
+import tempfile
+from collections.abc import Iterable, Sequence
 from typing import BinaryIO
 
 import numpy as np
+import openslide
 import pydicom
 import streamlit as st
 from dotenv import load_dotenv
@@ -55,6 +57,19 @@ DEFAULT_INSTRUCTION_CT = (
 # ranges are part of the model's trained input format, so they are fixed.
 CT_WINDOWS: list[tuple[int, int]] = [(-1024, 1024), (-135, 215), (0, 80)]
 
+WSI_TYPES = ["svs", "ndpi", "tif", "tiff"]
+WSI_PATCH_SIZE = 896  # MedGemma's native image size
+WSI_MAGNIFICATIONS = [5, 10, 20, 40]
+WSI_DEFAULT_MAG = 10
+WSI_THUMBNAIL_SIZE = 2048  # longest side of the tissue-mask thumbnail
+WSI_SATURATION_THRESHOLD = 20  # a pixel is tissue when max(RGB) - min(RGB) exceeds this
+WSI_MIN_TISSUE_FRACTION = 0.25  # min tissue fraction for a patch to qualify
+
+DEFAULT_INSTRUCTION_WSI = (
+    "You are an expert pathologist reviewing patches sampled from a whole-slide "
+    "image. Describe the salient histologic findings across the patches."
+)
+
 
 @st.cache_resource
 def load_model():
@@ -97,21 +112,23 @@ def get_generation_params(
     is_localizing: bool = False,
     is_comparing: bool = False,
     is_ct: bool = False,
+    is_wsi: bool = False,
 ) -> tuple[str, int]:
     if is_localizing:
         return LOCALIZATION_INSTRUCTION, 1300 if is_thinking else 1000
     if is_thinking:
-        # Thinking needs room for the trace AND the answer. A multi-slice CT read
-        # or a two-image comparison needs more than a single-image answer.
-        budget = 2500 if is_ct else 1600 if is_comparing else 1300
+        # Thinking needs room for the trace AND the answer. A multi-slice CT read, a
+        # multi-patch whole-slide read, or a two-image comparison needs more than a
+        # single-image answer.
+        budget = 2500 if (is_ct or is_wsi) else 1600 if is_comparing else 1300
         return (
             f"SYSTEM INSTRUCTION: think silently if needed. {system_instruction}",
             budget,
         )
-    if is_ct:
-        # Reading a multi-slice CT volume needs a large budget for slice-by-slice
-        # reasoning (cf. the reference notebook's 2000); the editable CT persona is
-        # kept as-is.
+    if is_ct or is_wsi:
+        # A multi-slice CT volume or multi-patch whole-slide read needs a large
+        # budget for tile-by-tile reasoning (cf. the reference notebooks' 2000); the
+        # editable persona is kept as-is.
         return system_instruction, 2000
     if is_comparing:
         # Comparing two images needs more room than a single-image answer; the
@@ -307,6 +324,205 @@ def ram_aware_slice_cap(total_ram_gib: float | None = None) -> tuple[int, int]:
     max_slices = max(2, min(hard_max, int(budget / per_slice_gib)))
     default = max(2, max_slices // 2)
     return default, max_slices
+
+
+def mag_from_mpp(mpp_x: float) -> float:
+    """Approximate objective power from microns-per-pixel (0.25 um/px ~ 40x)."""
+    return 10.0 / mpp_x
+
+
+def effective_magnification(objective_power: float, downsample: float) -> float:
+    """Effective magnification of a pyramid level: base power / its downsample."""
+    return objective_power / downsample
+
+
+def pick_level(
+    level_downsamples: Sequence[float], objective_power: float, target_mag: float
+) -> int:
+    """Index of the pyramid level whose effective magnification
+    (``objective_power / downsample``) is closest to ``target_mag``."""
+    mags = [objective_power / d for d in level_downsamples]
+    return min(range(len(mags)), key=lambda i: abs(mags[i] - target_mag))
+
+
+def patch_grid(level_w: int, level_h: int, patch_size: int) -> list[tuple[int, int]]:
+    """Top-left (x, y) coords of a non-overlapping patch grid over a level, in that
+    level's pixel frame. Partial edge tiles are dropped; row-major order so an even
+    subsample spreads spatially across the slide."""
+    return [
+        (x, y)
+        for y in range(0, level_h - patch_size + 1, patch_size)
+        for x in range(0, level_w - patch_size + 1, patch_size)
+    ]
+
+
+def tissue_mask(
+    thumbnail_rgb: np.ndarray, sat_threshold: int = WSI_SATURATION_THRESHOLD
+) -> np.ndarray:
+    """Boolean (H, W) tissue mask from an RGB thumbnail: a pixel is tissue when its
+    saturation proxy ``max(R,G,B) - min(R,G,B)`` exceeds ``sat_threshold`` — i.e. it
+    is not white/grey glass. Pure numpy."""
+    rgb = thumbnail_rgb.astype(np.int16)
+    saturation = rgb.max(axis=-1) - rgb.min(axis=-1)
+    return saturation > sat_threshold
+
+
+def tissue_patches(
+    grid: list[tuple[int, int]],
+    mask: np.ndarray,
+    level_size: tuple[int, int],
+    patch_size: int,
+    min_fraction: float = WSI_MIN_TISSUE_FRACTION,
+) -> list[tuple[int, int]]:
+    """Keep grid coords whose footprint, projected onto the thumbnail-scale ``mask``,
+    is at least ``min_fraction`` tissue. ``level_size`` is the (w, h) of the level the
+    grid was computed on; ``mask`` is shaped (h_mask, w_mask)."""
+    level_w, level_h = level_size
+    mask_h, mask_w = mask.shape
+    sx, sy = mask_w / level_w, mask_h / level_h
+    kept: list[tuple[int, int]] = []
+    for x, y in grid:
+        mx0, my0 = int(x * sx), int(y * sy)
+        mx1 = max(mx0 + 1, int((x + patch_size) * sx))
+        my1 = max(my0 + 1, int((y + patch_size) * sy))
+        window = mask[my0:my1, mx0:mx1]
+        if window.size and float(window.mean()) >= min_fraction:
+            kept.append((x, y))
+    return kept
+
+
+def mark_patches(
+    thumbnail: Image.Image,
+    coords: list[tuple[int, int]],
+    level_size: tuple[int, int],
+    patch_size: int,
+) -> Image.Image:
+    """Outline each kept patch's footprint on a copy of ``thumbnail``. ``coords`` are
+    level-pixel top-lefts, scaled to the thumbnail's size so the user sees which
+    regions were sampled."""
+    annotated = thumbnail.convert("RGB").copy()
+    draw = ImageDraw.Draw(annotated)
+    level_w, level_h = level_size
+    sx, sy = annotated.width / level_w, annotated.height / level_h
+    for x, y in coords:
+        draw.rectangle(
+            (
+                round(x * sx),
+                round(y * sy),
+                round((x + patch_size) * sx),
+                round((y + patch_size) * sy),
+            ),
+            outline="red",
+            width=2,
+        )
+    return annotated
+
+
+def _slide_objective_power(slide) -> float:
+    """Base objective power: the slide's objective-power property (when positive),
+    else derived from its microns-per-pixel, else a 40x default. A non-positive value
+    is treated as a miss — some scanners emit 0 for a missing objective power, which
+    would otherwise collapse pick_level to level 0 and disclose a bogus 0x."""
+    props = slide.properties
+    raw = props.get(openslide.PROPERTY_NAME_OBJECTIVE_POWER)
+    if raw is not None:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except (TypeError, ValueError):
+            pass
+    mpp = props.get(openslide.PROPERTY_NAME_MPP_X)
+    if mpp is not None:
+        try:
+            val = mag_from_mpp(float(mpp))
+            if val > 0:
+                return val
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    return 40.0
+
+
+def _read_patch(slide, x: int, y: int, level: int, downsample: float, size: int):
+    """Read one patch as RGB. ``read_region`` takes a LEVEL-0 location but a
+    target-level size, so the level-pixel coords are scaled by ``downsample``. RGBA
+    out-of-bounds pixels are composited onto white (a bare convert would blacken
+    them)."""
+    location = (round(x * downsample), round(y * downsample))
+    region = slide.read_region(location, level, (size, size))
+    background = Image.new("RGBA", region.size, (255, 255, 255, 255))
+    return Image.alpha_composite(background, region).convert("RGB")
+
+
+def load_wsi_patches(
+    uploaded_file,
+    target_mag: float,
+    max_patches: int,
+    patch_size: int = WSI_PATCH_SIZE,
+    min_fraction: float = WSI_MIN_TISSUE_FRACTION,
+) -> tuple[list[Image.Image], Image.Image, float]:
+    """Read tissue patches from an uploaded whole-slide image.
+
+    Spills the upload to a temp file (OpenSlide opens by path), picks the pyramid
+    level nearest ``target_mag``, tiles it into ``patch_size`` patches over tissue,
+    deterministically caps to ``max_patches`` (see ``subsample_indices``), and reads
+    each patch as RGB. Returns ``(patches, overlay, actual_mag)`` where ``overlay`` is
+    the thumbnail with the sampled patches outlined and ``actual_mag`` is the chosen
+    level's true magnification. Raises ``ValueError`` with a user-facing message for an
+    unreadable slide, a slide too small for one patch, or one with no detectable
+    tissue.
+    """
+    suffix = os.path.splitext(getattr(uploaded_file, "name", "") or "")[1] or ".svs"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    path = tmp.name
+    try:
+        # Bind ``path`` and enter the cleanup scope before writing, so a failed write
+        # (e.g. disk-full on a multi-GB slide) still unlinks the spilled temp file.
+        try:
+            tmp.write(uploaded_file.getvalue())
+        finally:
+            tmp.close()
+        try:
+            slide = openslide.OpenSlide(path)
+        except (openslide.OpenSlideError, OSError) as exc:
+            raise ValueError(
+                "Could not read this file as a whole-slide image. Supported "
+                "formats: .svs, .ndpi, .tif/.tiff."
+            ) from exc
+        try:
+            objective_power = _slide_objective_power(slide)
+            level = pick_level(slide.level_downsamples, objective_power, target_mag)
+            downsample = slide.level_downsamples[level]
+            level_w, level_h = slide.level_dimensions[level]
+            grid = patch_grid(level_w, level_h, patch_size)
+            if not grid:
+                raise ValueError(
+                    "Slide is too small for 896px patches at this magnification; "
+                    "try a higher magnification."
+                )
+            thumbnail = slide.get_thumbnail(
+                (WSI_THUMBNAIL_SIZE, WSI_THUMBNAIL_SIZE)
+            ).convert("RGB")
+            mask = tissue_mask(np.asarray(thumbnail))
+            tissue = tissue_patches(
+                grid, mask, (level_w, level_h), patch_size, min_fraction
+            )
+            if not tissue:
+                raise ValueError(
+                    "No tissue detected on this slide. Try a lower magnification or "
+                    "a different slide."
+                )
+            kept = [tissue[i] for i in subsample_indices(len(tissue), max_patches)]
+            patches = [
+                _read_patch(slide, x, y, level, downsample, patch_size) for x, y in kept
+            ]
+            overlay = mark_patches(thumbnail, kept, (level_w, level_h), patch_size)
+            actual_mag = effective_magnification(objective_power, downsample)
+            return patches, overlay, actual_mag
+        finally:
+            slide.close()
+    finally:
+        os.unlink(path)
 
 
 def show_response(response: str) -> None:
@@ -596,17 +812,92 @@ def render_ct_tab(model, processor, config):
     show_response(render_thought(raw, is_thinking))
 
 
+def render_wsi_tab(model, processor, config):
+    st.caption(
+        "Upload a whole-slide image (.svs/.ndpi/.tiff). Tissue patches are sampled at "
+        "a chosen magnification and read as the 896px tiles MedGemma 1.5 is trained on."
+    )
+    prompt = st.text_input(
+        "Enter your question",
+        placeholder="e.g. Describe the histologic findings",
+        key="wsi_prompt",
+    ).strip()
+    slide_file = st.file_uploader("Upload a slide", type=WSI_TYPES, key="wsi_files")
+    target_mag = st.select_slider(
+        "Magnification",
+        options=WSI_MAGNIFICATIONS,
+        value=WSI_DEFAULT_MAG,
+        help="Higher magnification shows finer detail over less area. Clamped to the "
+        "slide's available pyramid levels.",
+        key="wsi_mag",
+    )
+
+    default_patches, max_patches = ram_aware_slice_cap()
+    if max_patches > 2:
+        n_patches = st.slider(
+            "Patches to analyze",
+            min_value=2,
+            max_value=max_patches,
+            value=default_patches,
+            help="Tissue patches are sampled uniformly across the slide. The cap "
+            "scales to your machine's memory.",
+            key="wsi_patches",
+        )
+    else:
+        n_patches = 2
+        st.caption("Limited memory detected: analyzing 2 patches.")
+
+    instruction, is_thinking = tab_settings("wsi", DEFAULT_INSTRUCTION_WSI)
+
+    if not st.button(
+        "Run", type="primary", disabled=not (prompt and slide_file), key="wsi_run"
+    ):
+        return
+
+    try:
+        patches, overlay, actual_mag = load_wsi_patches(
+            slide_file, target_mag, n_patches
+        )
+    except Exception as e:
+        st.error(f"Failed to read slide: {e}")
+        return
+
+    st.image(overlay, caption="Tissue overview", width="stretch")
+    st.caption(f"{len(patches)} patches sampled at ~{actual_mag:.1f}x.")
+    st.image(
+        patches[0],
+        caption=f"Sample patch (1 of {len(patches)})",
+        width="stretch",
+    )
+    labels = [f"PATCH {i}" for i in range(1, len(patches) + 1)]
+    full_instruction, max_new_tokens = get_generation_params(
+        has_image=True,
+        is_thinking=is_thinking,
+        system_instruction=instruction,
+        is_wsi=True,
+    )
+    messages = build_messages(prompt, full_instruction, patches, image_labels=labels)
+    raw = run_model(model, processor, config, messages, patches, max_new_tokens)
+    if raw is None:
+        return
+    show_response(render_thought(raw, is_thinking))
+
+
 def main():
     st.title("MedGemma Pipeline")
     with st.spinner("Loading model..."):
         model, processor, config = load_model()
-    tab_ask, tab_cxr, tab_ct = st.tabs(["Ask", "Chest X-ray", "Computed Tomography"])
+    tab_ask, tab_cxr, tab_ct, tab_wsi = st.tabs(
+        ["Ask", "Chest X-ray", "Computed Tomography", "Pathology (WSI)"]
+    )
     with tab_ask:
         render_ask_tab(model, processor, config)
     with tab_cxr:
         render_cxr_tab(model, processor, config)
     with tab_ct:
         render_ct_tab(model, processor, config)
+    with tab_wsi:
+        render_wsi_tab(model, processor, config)
 
 
 if __name__ == "__main__":

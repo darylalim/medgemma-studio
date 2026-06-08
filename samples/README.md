@@ -1,12 +1,13 @@
 # Sample data for local testing
 
 These files are **not committed** — they are gitignored; only this README is
-tracked. They are local fixtures for manually exercising the app's image and CT
-features. The automated tests do not use them (they build tiny in-memory
-fixtures instead), so this folder is optional.
+tracked. They are local fixtures for manually exercising the app's image, CT, and
+whole-slide pathology features. The automated tests do not use them (they build
+tiny in-memory fixtures instead), so this folder is optional.
 
 - `cxr/` — a longitudinal chest X-ray "before"/"after" pair (Chest X-ray tab)
 - `ct/` — a CT DICOM series (Computed Tomography tab)
+- `wsi/` — a whole-slide pathology image (Pathology (WSI) tab)
 
 ## `cxr/` — longitudinal chest X-ray pair
 
@@ -70,3 +71,36 @@ find samples/ct -mindepth 2 -name '*.dcm' -exec mv -n {} samples/ct/ \; && find 
 3. Upload all `samples/ct/*.dcm` files (multi-select), then set how many slices
    to analyze (sampled uniformly across the volume; the cap scales to your RAM).
 4. Run. A sample windowed (false-color) slice and the model's read are shown.
+
+## `wsi/` — whole-slide pathology image
+
+`CMU-1-Small-Region.svs` — a small Aperio (`.svs`) region from the OpenSlide
+freely-distributable [test data](https://openslide.org/formats/aperio/). It is a
+single-level 20× slide (2220×2967), so it loads fast and is handy for a quick
+smoke test of the **Pathology (WSI)** tab.
+
+> Public test data from the OpenSlide project — not patient data and not for any
+> clinical use.
+
+### Download
+
+```bash
+mkdir -p samples/wsi
+curl -fsSL -o samples/wsi/CMU-1-Small-Region.svs \
+  "https://openslide.cs.cmu.edu/download/openslide-testdata/Aperio/CMU-1-Small-Region.svs"
+```
+
+For a multi-level slide (so the magnification slider actually switches pyramid
+levels), grab `CMU-1.svs` from the same `Aperio/` directory (~170 MB).
+
+### How to use
+
+1. Run the app and open the **Pathology (WSI)** tab.
+2. Enter a prompt, e.g. *"Describe the histologic findings."*
+3. Upload `samples/wsi/CMU-1-Small-Region.svs`, then pick a magnification and how
+   many patches to analyze (tissue patches sampled across the slide; the cap
+   scales to your RAM).
+4. Run. A tissue-overview overlay (sampled patches outlined), a sample patch, and
+   the model's read are shown. On this single-level 20× region the disclosed
+   magnification clamps to ~20× and only ~3 tissue patches qualify — both
+   expected for such a small slide.

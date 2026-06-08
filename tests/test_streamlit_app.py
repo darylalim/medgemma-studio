@@ -1,3 +1,4 @@
+import io
 import os
 import subprocess
 from types import SimpleNamespace
@@ -9,17 +10,27 @@ from PIL import Image
 from streamlit_app import (
     LOCALIZATION_INSTRUCTION,
     _detect_total_ram_gib,
+    _read_patch,
+    _slide_objective_power,
     build_messages,
     draw_boxes,
+    effective_magnification,
     get_generation_params,
     load_ct_volume,
+    load_wsi_patches,
+    mag_from_mpp,
+    mark_patches,
     normalize_hu,
     pad_to_square,
     parse_boxes,
     parse_response,
+    patch_grid,
+    pick_level,
     ram_aware_slice_cap,
     scale_box,
     subsample_indices,
+    tissue_mask,
+    tissue_patches,
     window_ct_slice,
 )
 from tests.dicom_helpers import dicom_bytes as _dicom_bytes
@@ -208,6 +219,26 @@ class TestGetGenerationParams:
             is_thinking=is_thinking,
             system_instruction="Be helpful.",
             is_ct=True,
+        )
+        assert instruction == expected_instruction
+        assert tokens == expected_tokens
+
+    @pytest.mark.parametrize(
+        "is_thinking, expected_instruction, expected_tokens",
+        [
+            (False, "Be helpful.", 2000),
+            (True, THINKING_INSTRUCTION, 2500),
+        ],
+        ids=["wsi", "wsi+thinking"],
+    )
+    def test_wsi_params(self, is_thinking, expected_instruction, expected_tokens):
+        # WSI shares CT's multi-image budget (2000 / 2500 with thinking); the editable
+        # pathology persona is kept as-is.
+        instruction, tokens = get_generation_params(
+            has_image=True,
+            is_thinking=is_thinking,
+            system_instruction="Be helpful.",
+            is_wsi=True,
         )
         assert instruction == expected_instruction
         assert tokens == expected_tokens
@@ -522,3 +553,296 @@ class TestDetectTotalRamGib:
 
         monkeypatch.setattr(subprocess, "run", _raise)
         assert _detect_total_ram_gib() == 16.0
+
+
+class TestMagFromMpp:
+    @pytest.mark.parametrize("mpp, mag", [(0.25, 40.0), (0.5, 20.0), (1.0, 10.0)])
+    def test_objective_power_from_microns(self, mpp, mag):
+        assert mag_from_mpp(mpp) == pytest.approx(mag)
+
+
+class TestEffectiveMagnification:
+    def test_base_level_is_objective_power(self):
+        assert effective_magnification(40.0, 1.0) == 40.0
+
+    def test_downsampled_level_scales_down(self):
+        assert effective_magnification(40.0, 4.0) == 10.0
+
+
+class TestPickLevel:
+    def test_picks_closest_magnification(self):
+        # downsamples [1, 4, 16] @ 40x objective -> effective mags [40, 10, 2.5].
+        assert pick_level([1, 4, 16], 40, 10) == 1
+        assert pick_level([1, 4, 16], 40, 40) == 0
+        assert pick_level([1, 4, 16], 40, 5) == 2  # 2.5 is closer to 5 than 10 is
+
+    def test_single_level_always_zero(self):
+        assert pick_level([1.0], 40, 10) == 0
+
+
+class TestPatchGrid:
+    def test_non_overlapping_row_major(self):
+        assert patch_grid(2000, 2000, 896) == [(0, 0), (896, 0), (0, 896), (896, 896)]
+
+    def test_drops_partial_edge_tiles(self):
+        assert all(
+            x + 896 <= 2000 and y + 896 <= 2000 for x, y in patch_grid(2000, 2000, 896)
+        )
+
+    def test_too_small_is_empty(self):
+        assert patch_grid(500, 500, 896) == []
+
+    def test_exact_fit_single_tile(self):
+        assert patch_grid(896, 896, 896) == [(0, 0)]
+
+
+class TestTissueMask:
+    def test_white_glass_is_not_tissue(self):
+        assert not tissue_mask(np.full((4, 4, 3), 255, dtype=np.uint8)).any()
+
+    def test_grey_is_not_tissue(self):
+        # Zero saturation (R == G == B) reads as background regardless of brightness.
+        assert not tissue_mask(np.full((4, 4, 3), 128, dtype=np.uint8)).any()
+
+    def test_saturated_stain_is_tissue(self):
+        purple = np.zeros((4, 4, 3), dtype=np.uint8)
+        purple[..., 0], purple[..., 2] = 150, 140  # high R/B, low G -> saturated
+        assert tissue_mask(purple).all()
+
+    def test_preserves_2d_shape(self):
+        assert tissue_mask(np.zeros((6, 5, 3), dtype=np.uint8)).shape == (6, 5)
+
+
+class TestTissuePatches:
+    def test_keeps_only_tissue_side(self):
+        mask = np.zeros((10, 10), dtype=bool)
+        mask[:, :5] = True  # left half of the slide is tissue
+        grid = patch_grid(1000, 1000, 500)  # (0,0),(500,0),(0,500),(500,500)
+        kept = tissue_patches(grid, mask, (1000, 1000), 500, min_fraction=0.25)
+        assert kept == [(0, 0), (0, 500)]  # only the x < 500 column survives
+
+    def test_min_fraction_threshold(self):
+        mask = np.zeros((10, 10), dtype=bool)
+        mask[:, :5] = True  # a single full-width patch is exactly half tissue
+        grid = [(0, 0)]
+        assert tissue_patches(grid, mask, (1000, 1000), 1000, 0.25) == [(0, 0)]
+        assert tissue_patches(grid, mask, (1000, 1000), 1000, 0.75) == []
+
+    def test_empty_grid(self):
+        assert tissue_patches([], np.ones((4, 4), dtype=bool), (1000, 1000), 500) == []
+
+
+class TestMarkPatches:
+    def test_returns_rgb_same_size(self):
+        out = mark_patches(Image.new("RGB", (100, 100)), [(0, 0)], (1000, 1000), 500)
+        assert out.size == (100, 100)
+        assert out.mode == "RGB"
+
+    def test_draws_red_outline_at_scaled_location(self):
+        # patch (0,0) size 500 over a 1000px level -> rect (0,0,50,50) on the thumbnail.
+        out = mark_patches(Image.new("RGB", (100, 100)), [(0, 0)], (1000, 1000), 500)
+        assert out.getpixel((0, 25)) == (255, 0, 0)  # on the left edge
+        assert out.getpixel((25, 25)) == (0, 0, 0)  # interior is not filled
+
+    def test_empty_coords_is_noop_copy(self):
+        out = mark_patches(Image.new("RGB", (40, 40)), [], (1000, 1000), 500)
+        assert out.size == (40, 40)
+
+
+class _FakeSlide:
+    """Minimal OpenSlide stand-in: just the surface load_wsi_patches touches."""
+
+    def __init__(self, *, level_dimensions, level_downsamples, properties, thumbnail):
+        self.level_dimensions = level_dimensions
+        self.level_downsamples = level_downsamples
+        self.dimensions = level_dimensions[0]
+        self.properties = properties
+        self._thumbnail = thumbnail
+        self.closed = False
+        self.read_calls: list = []
+
+    def get_thumbnail(self, size):
+        return self._thumbnail
+
+    def read_region(self, location, level, size):
+        self.read_calls.append((location, level, size))
+        return Image.new("RGBA", size, (150, 40, 140, 255))
+
+    def close(self):
+        self.closed = True
+
+
+def _tissue_thumbnail(size=(800, 800)):
+    arr = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+    arr[..., 0], arr[..., 2] = 150, 140  # saturated purple -> all tissue
+    return Image.fromarray(arr, "RGB")
+
+
+def _make_slide(**overrides):
+    kwargs = dict(
+        level_dimensions=[(3000, 3000)],
+        level_downsamples=[1.0],
+        properties={"openslide.objective-power": "40"},
+        thumbnail=_tissue_thumbnail(),
+    )
+    kwargs.update(overrides)
+    return _FakeSlide(**kwargs)
+
+
+class TestLoadWsiPatches:
+    def test_returns_capped_rgb_patches(self, monkeypatch):
+        slide = _make_slide()  # 3000x3000 -> a 3x3 grid of nine tissue patches
+        monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
+        patches, overlay, actual_mag = load_wsi_patches(
+            io.BytesIO(b"x"), 40, max_patches=4
+        )
+        assert len(patches) == 4  # capped from nine
+        assert all(p.mode == "RGB" and p.size == (896, 896) for p in patches)
+        assert isinstance(overlay, Image.Image)
+        assert actual_mag == 40.0
+
+    def test_tissue_filtering_reduces_patch_count(self, monkeypatch):
+        # Tissue only on the slide's left third: the 3x3 grid (nine tiles) is filtered
+        # end-to-end down to the three left-column patches, even though eight were
+        # requested. This is the real 6->3-style reduction seen on actual slides
+        # (the all-tissue fixture above never exercises the filter shrinking the set).
+        thumb = np.full((800, 800, 3), 255, dtype=np.uint8)  # white glass
+        thumb[:, :250, 0], thumb[:, :250, 2] = 150, 140  # left third = saturated tissue
+        slide = _make_slide(thumbnail=Image.fromarray(thumb, "RGB"))
+        monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
+        patches, _, _ = load_wsi_patches(io.BytesIO(b"x"), 40, max_patches=8)
+        assert len(patches) == 3  # nine candidates, only the left column is tissue
+
+    def test_reads_at_level0_coordinates(self, monkeypatch):
+        # A 10x target on a 40x slide selects level 1 (downsample 4); read_region must
+        # get LEVEL-0 locations (level-pixel coords * downsample) at that level.
+        slide = _make_slide(
+            level_dimensions=[(8000, 8000), (2000, 2000)],
+            level_downsamples=[1.0, 4.0],
+        )
+        monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
+        load_wsi_patches(io.BytesIO(b"x"), 10, max_patches=16)
+        assert slide.read_calls, "expected at least one patch read"
+        assert all(level == 1 for _, level, _ in slide.read_calls)
+        # Level grid coords are multiples of 896; level-0 locations are 4x those.
+        assert all(
+            lx % (896 * 4) == 0 and ly % (896 * 4) == 0
+            for (lx, ly), _, _ in slide.read_calls
+        )
+
+    def test_no_tissue_raises(self, monkeypatch):
+        slide = _make_slide(thumbnail=Image.new("RGB", (800, 800), (255, 255, 255)))
+        monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
+        with pytest.raises(ValueError, match="No tissue"):
+            load_wsi_patches(io.BytesIO(b"x"), 40, max_patches=4)
+
+    def test_too_small_raises(self, monkeypatch):
+        slide = _make_slide(level_dimensions=[(500, 500)])
+        monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
+        with pytest.raises(ValueError, match="too small"):
+            load_wsi_patches(io.BytesIO(b"x"), 40, max_patches=4)
+
+    def test_unreadable_slide_raises(self, monkeypatch):
+        def _boom(path):
+            raise OSError("not a slide")
+
+        monkeypatch.setattr("openslide.OpenSlide", _boom)
+        with pytest.raises(ValueError, match="whole-slide image"):
+            load_wsi_patches(io.BytesIO(b"x"), 40, max_patches=4)
+
+    def test_objective_power_falls_back_to_mpp(self, monkeypatch):
+        # No objective-power property; 0.5 um/px -> 20x base, so level 0 reports ~20x.
+        slide = _make_slide(properties={"openslide.mpp-x": "0.5"})
+        monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
+        _, _, actual_mag = load_wsi_patches(io.BytesIO(b"x"), 20, max_patches=2)
+        assert actual_mag == pytest.approx(20.0)
+
+    def test_closes_slide_and_removes_tempfile(self, monkeypatch):
+        slide = _make_slide()
+        monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
+        unlinked: list = []
+        real_unlink = os.unlink
+        monkeypatch.setattr(
+            os, "unlink", lambda p: (unlinked.append(p), real_unlink(p))
+        )
+        load_wsi_patches(io.BytesIO(b"x"), 40, max_patches=2)
+        assert slide.closed is True
+        assert unlinked and not os.path.exists(unlinked[0])
+
+    def test_removes_tempfile_when_upload_read_fails(self, monkeypatch):
+        # A write failure between NamedTemporaryFile and the open must still unlink the
+        # spilled temp file (it can be multi-GB for a real slide).
+        unlinked: list = []
+        real_unlink = os.unlink
+        monkeypatch.setattr(
+            os, "unlink", lambda p: (unlinked.append(p), real_unlink(p))
+        )
+
+        class _Boom(io.BytesIO):
+            name = "slide.svs"
+
+            def getvalue(self):
+                raise OSError("disk full")
+
+        with pytest.raises(OSError, match="disk full"):
+            load_wsi_patches(_Boom(b""), 40, max_patches=2)
+        assert unlinked and not os.path.exists(unlinked[0])
+
+
+class TestReadPatch:
+    def test_composites_transparent_region_onto_white(self):
+        # Out-of-bounds RGBA (alpha 0) must read back as white, not black — a bare
+        # .convert("RGB") would blacken it.
+        class _Slide:
+            def read_region(self, location, level, size):
+                return Image.new("RGBA", size, (0, 0, 0, 0))  # fully transparent
+
+        patch = _read_patch(_Slide(), 0, 0, 0, 1.0, 4)
+        assert patch.mode == "RGB"
+        assert patch.getpixel((0, 0)) == (255, 255, 255)
+
+    def test_scales_location_by_downsample(self):
+        # read_region takes a LEVEL-0 location (grid coord * downsample) at the level.
+        calls: list = []
+
+        class _Slide:
+            def read_region(self, location, level, size):
+                calls.append((location, level, size))
+                return Image.new("RGBA", size, (10, 20, 30, 255))
+
+        _read_patch(_Slide(), 100, 200, 2, 4.0, 896)
+        assert calls == [((400, 800), 2, (896, 896))]  # (100*4, 200*4), level 2
+
+
+class TestSlideObjectivePower:
+    @staticmethod
+    def _slide(props):
+        return SimpleNamespace(properties=props)
+
+    def test_uses_positive_objective_power(self):
+        slide = self._slide({"openslide.objective-power": "20"})
+        assert _slide_objective_power(slide) == 20.0
+
+    def test_zero_objective_power_falls_back_to_mpp(self):
+        # "0" is a non-positive value some scanners emit for a missing objective power;
+        # it must not be trusted (mpp 0.5 -> 20x instead of collapsing pick_level).
+        slide = self._slide(
+            {"openslide.objective-power": "0", "openslide.mpp-x": "0.5"}
+        )
+        assert _slide_objective_power(slide) == pytest.approx(20.0)
+
+    def test_malformed_objective_power_falls_back_to_mpp(self):
+        slide = self._slide(
+            {"openslide.objective-power": "unknown", "openslide.mpp-x": "0.25"}
+        )
+        assert _slide_objective_power(slide) == pytest.approx(40.0)
+
+    def test_zero_mpp_falls_back_to_default(self):
+        assert _slide_objective_power(self._slide({"openslide.mpp-x": "0"})) == 40.0
+
+    def test_negative_mpp_falls_back_to_default(self):
+        # mag_from_mpp(-0.5) = -20 -> non-positive -> 40x default.
+        assert _slide_objective_power(self._slide({"openslide.mpp-x": "-0.5"})) == 40.0
+
+    def test_no_properties_defaults_to_40(self):
+        assert _slide_objective_power(self._slide({})) == 40.0
