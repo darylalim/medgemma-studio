@@ -1,4 +1,5 @@
 import io
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -8,9 +9,11 @@ from streamlit.testing.v1 import AppTest
 
 from streamlit_app import (
     DEFAULT_INSTRUCTION_COMPARE,
+    DEFAULT_INSTRUCTION_CT,
     DEFAULT_INSTRUCTION_IMAGE,
     DEFAULT_INSTRUCTION_TEXT,
 )
+from tests.dicom_helpers import dicom_bytes
 
 APP_PATH = str(Path(__file__).parent.parent / "streamlit_app.py")
 
@@ -20,8 +23,8 @@ def patched_mlx(monkeypatch):
     """Replace the heavy MLX model load + inference with fast test doubles.
 
     Patched at the source (`mlx_vlm.*`) rather than on `streamlit_app`, because
-    AppTest re-executes the script in a fresh namespace on every `.run()`.
-    Returns the mock generation output so tests can set `.text`.
+    AppTest re-executes the script in a fresh namespace on every `.run()`. Returns
+    the mock generation output so tests can set `.text`.
     """
     monkeypatch.setattr("mlx_vlm.load", lambda *a, **k: (MagicMock(), MagicMock()))
     monkeypatch.setattr("mlx_vlm.utils.load_config", lambda *a, **k: {})
@@ -48,130 +51,148 @@ def png_bytes():
     return buf.getvalue()
 
 
+def _dicom_bytes(*args, **kwargs):
+    """Raw bytes of an in-memory CT DICOM slice, for AppTest's file_uploader.upload()."""
+    return dicom_bytes(*args, **kwargs).getvalue()
+
+
+def _force_ram_gib(monkeypatch, gib):
+    """Force the CT slice cap deterministically by making _detect_total_ram_gib's
+    os.sysconf reading report a fixed installed-RAM value, regardless of host."""
+    real_sysconf = os.sysconf
+
+    def fake(name):
+        if name == "SC_PHYS_PAGES":
+            return int(gib) * 1024**3 // 4096
+        if name == "SC_PAGE_SIZE":
+            return 4096
+        return real_sysconf(name)
+
+    monkeypatch.setattr(os, "sysconf", fake)
+
+
+def _upload_ct_pair(at):
+    """Upload two DICOM slices to the CT tab (chained: AppTest replaces, not appends)."""
+    at.file_uploader(key="ct_files").upload(
+        "a.dcm", _dicom_bytes(2, 200), "application/dicom"
+    ).upload("b.dcm", _dicom_bytes(1, 100), "application/dicom").run()
+
+
+# --------------------------------------------------------------------------- #
+# Layout / shared
+# --------------------------------------------------------------------------- #
+
+
 def test_title_renders(app):
     assert not app.exception
     assert app.title[0].value == "MedGemma Pipeline"
 
 
-def test_run_button_disabled_without_prompt(app):
-    assert app.button[0].label == "Run"
-    assert app.button[0].disabled is True
+def test_three_tabs_render(app):
+    assert [t.label for t in app.tabs] == ["Ask", "Chest X-ray", "Computed Tomography"]
 
 
-def test_run_button_enabled_with_prompt(app):
-    app.text_input[0].set_value("Describe this X-ray").run()
-    assert app.button[0].disabled is False
-
-
-def test_whitespace_prompt_keeps_run_disabled(app):
-    app.text_input[0].set_value("   ").run()
-    assert app.button[0].disabled is True
-
-
-def test_default_system_instruction_text_only(app):
-    assert app.text_area[0].value == DEFAULT_INSTRUCTION_TEXT
-
-
-def test_thinking_toggle_defaults_off(app):
-    assert app.toggle[0].label == "Thinking"
-    assert app.toggle[0].value is False
-
-
-def test_settings_always_visible(app):
-    # Settings were moved out of an expander; nothing is collapsed on first render.
+def test_no_expander_on_first_render(app):
+    # The "Thinking trace" expander appears only after a thinking response.
     assert len(app.expander) == 0
-    assert len(app.text_area) == 1  # system instruction
-    assert len(app.toggle) == 2  # thinking + localization toggles
 
 
-def test_localization_toggle_disabled_without_image(app):
-    assert app.toggle[1].label == "Locate anatomy (bounding boxes)"
-    assert app.toggle[1].disabled is True
+def test_each_tab_has_independent_settings(app):
+    # Per-tab instruction + thinking widgets keyed by tab; one Run button each.
+    assert [w.key for w in app.text_area] == [
+        "ask_instruction",
+        "cxr_instruction",
+        "ct_instruction",
+    ]
+    assert {w.key for w in app.toggle} == {
+        "ask_thinking",
+        "cxr_thinking",
+        "cxr_localize",
+        "ct_thinking",
+    }
+    assert [w.key for w in app.button] == ["ask_run", "cxr_run", "ct_run"]
 
 
-def test_localization_caption_discloses_override(app, png_bytes):
-    # No disclosure caption until localization is actually active.
-    assert not any("ignored in this mode" in c.value for c in app.caption)
-    app.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
-    app.toggle[1].set_value(True).run()
-    assert any("ignored in this mode" in c.value for c in app.caption)
+def test_thinking_toggles_are_independent(app):
+    app.toggle(key="ask_thinking").set_value(True).run()
+    assert app.toggle(key="ask_thinking").value is True
+    assert app.toggle(key="cxr_thinking").value is False
+    assert app.toggle(key="ct_thinking").value is False
 
 
-def test_response_renders(app):
-    app.text_input[0].set_value("Describe this X-ray").run()
-    app.button[0].click().run()
+# --------------------------------------------------------------------------- #
+# Ask tab (text-only Q&A)
+# --------------------------------------------------------------------------- #
+
+
+def test_ask_default_instruction_is_text_persona(app):
+    assert app.text_area(key="ask_instruction").value == DEFAULT_INSTRUCTION_TEXT
+
+
+def test_ask_thinking_defaults_off(app):
+    assert app.toggle(key="ask_thinking").value is False
+
+
+def test_ask_run_disabled_without_prompt(app):
+    assert app.button(key="ask_run").disabled is True
+
+
+def test_ask_run_enabled_with_prompt(app):
+    app.text_input(key="ask_prompt").set_value("What causes effusion?").run()
+    assert app.button(key="ask_run").disabled is False
+
+
+def test_ask_whitespace_prompt_keeps_run_disabled(app):
+    app.text_input(key="ask_prompt").set_value("   ").run()
+    assert app.button(key="ask_run").disabled is True
+
+
+def test_ask_response_renders(app):
+    app.text_input(key="ask_prompt").set_value("What is a fracture?").run()
+    app.button(key="ask_run").click().run()
     assert not app.exception
     markdowns = [m.value for m in app.markdown]
     assert "### Response" in markdowns
     assert "No acute findings." in markdowns
 
 
-def test_thinking_trace_renders(patched_mlx):
+def test_ask_thinking_trace_renders(patched_mlx):
     patched_mlx.text = "<unused94>thought\nLet me reason.<unused95>Final answer."
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Describe this X-ray").run()
-    at.toggle[0].set_value(True).run()
-    at.button[0].click().run()
+    at.text_input(key="ask_prompt").set_value("Why?").run()
+    at.toggle(key="ask_thinking").set_value(True).run()
+    at.button(key="ask_run").click().run()
     assert not at.exception
     markdowns = [m.value for m in at.markdown]
     assert "Let me reason." in markdowns  # the thinking trace
     assert "Final answer." in markdowns  # the parsed answer
 
 
-def test_thinking_on_no_markers_no_expander(patched_mlx):
+def test_ask_thinking_no_markers_no_expander(patched_mlx):
     patched_mlx.text = "Just a plain reply without markers."
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Describe this X-ray").run()
-    at.toggle[0].set_value(True).run()
-    at.button[0].click().run()
+    at.text_input(key="ask_prompt").set_value("Why?").run()
+    at.toggle(key="ask_thinking").set_value(True).run()
+    at.button(key="ask_run").click().run()
     assert not at.exception
     assert len(at.expander) == 0  # no spurious "Thinking trace" expander
-    markdowns = [m.value for m in at.markdown]
-    assert "### Response" in markdowns
-    assert "Just a plain reply without markers." in markdowns
+    assert "Just a plain reply without markers." in [m.value for m in at.markdown]
 
 
-def test_inference_failure_renders_error(patched_mlx, monkeypatch):
+def test_ask_inference_failure_renders_error(patched_mlx, monkeypatch):
     def _raise(*a, **k):
         raise RuntimeError("model exploded")
 
     monkeypatch.setattr("mlx_vlm.generate", _raise)
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Describe this X-ray").run()
-    at.button[0].click().run()
+    at.text_input(key="ask_prompt").set_value("Why?").run()
+    at.button(key="ask_run").click().run()
     assert not at.exception
-    assert at.error[0].value == "Inference failed: model exploded"
+    assert any(e.value == "Inference failed: model exploded" for e in at.error)
     assert "### Response" not in [m.value for m in at.markdown]
 
 
-def test_image_upload_switches_default_instruction(app, png_bytes):
-    # No image yet -> generalist default.
-    assert app.text_area[0].value == DEFAULT_INSTRUCTION_TEXT
-    app.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
-    # Upload succeeded (Image.open did not raise) and the default adapts.
-    assert not app.exception
-    assert app.text_area[0].value == DEFAULT_INSTRUCTION_IMAGE
-
-
-def test_edit_then_upload_preserves_instruction(app, png_bytes):
-    # A user-edited instruction must survive a later image upload (no data loss).
-    app.text_area[0].set_value("MY CUSTOM INSTRUCTION").run()
-    app.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
-    assert not app.exception
-    assert app.text_area[0].value == "MY CUSTOM INSTRUCTION"
-
-
-def test_invalid_image_shows_error(app):
-    app.file_uploader[0].upload("bad.png", b"not-an-image", "image/png").run()
-    assert not app.exception
-    assert (
-        app.error[0].value == "Failed to load image. Please upload a valid image file."
-    )
-    # uploaded_image stayed None, so the generalist default is preserved.
-    assert app.text_area[0].value == DEFAULT_INSTRUCTION_TEXT
-
-
-def test_image_inference_passes_image_to_model(patched_mlx, monkeypatch, png_bytes):
+def test_ask_passes_no_image_to_model(patched_mlx, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         "mlx_vlm.prompt_utils.apply_chat_template",
@@ -180,29 +201,119 @@ def test_image_inference_passes_image_to_model(patched_mlx, monkeypatch, png_byt
     out = MagicMock()
     out.text = "No acute findings."
     monkeypatch.setattr(
-        "mlx_vlm.generate",
-        lambda *a, **k: captured.update(gen_args=a) or out,
+        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
     )
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Describe this X-ray").run()
-    at.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
-    at.button[0].click().run()
+    at.text_input(key="ask_prompt").set_value("What is a fracture?").run()
+    at.button(key="ask_run").click().run()
+    assert not at.exception
+    assert captured["act_kwargs"]["num_images"] == 0
+    assert captured["gen_args"][3] is None  # no image -> None passed positionally
+
+
+# --------------------------------------------------------------------------- #
+# Chest X-ray tab (single image / comparison / localization)
+# --------------------------------------------------------------------------- #
+
+
+def test_cxr_default_instruction_is_image_persona(app):
+    # Text-only Q&A now lives in the Ask tab, so the CXR default is the radiologist
+    # persona even before an image is attached.
+    assert app.text_area(key="cxr_instruction").value == DEFAULT_INSTRUCTION_IMAGE
+
+
+def test_cxr_localization_toggle_disabled_without_image(app):
+    assert app.toggle(key="cxr_localize").label == "Locate anatomy (bounding boxes)"
+    assert app.toggle(key="cxr_localize").disabled is True
+
+
+def test_cxr_localization_caption_discloses_override(app, png_bytes):
+    assert not any("ignored in this mode" in c.value for c in app.caption)
+    app.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    app.toggle(key="cxr_localize").set_value(True).run()
+    assert any("ignored in this mode" in c.value for c in app.caption)
+
+
+def test_cxr_second_uploader_appears_after_first_image(app, png_bytes):
+    assert "cxr_image2" not in [w.key for w in app.file_uploader]
+    app.file_uploader(key="cxr_image1").upload(
+        "first.png", png_bytes, "image/png"
+    ).run()
+    assert "cxr_image2" in [w.key for w in app.file_uploader]
+
+
+def test_cxr_two_images_switch_to_comparison_instruction(app, png_bytes):
+    app.file_uploader(key="cxr_image1").upload("a.png", png_bytes, "image/png").run()
+    app.file_uploader(key="cxr_image2").upload("b.png", png_bytes, "image/png").run()
+    assert not app.exception
+    assert app.text_area(key="cxr_instruction").value == DEFAULT_INSTRUCTION_COMPARE
+
+
+def test_cxr_localization_disabled_with_two_images(app, png_bytes):
+    app.file_uploader(key="cxr_image1").upload("a.png", png_bytes, "image/png").run()
+    assert app.toggle(key="cxr_localize").disabled is False  # one image
+    app.file_uploader(key="cxr_image2").upload("b.png", png_bytes, "image/png").run()
+    assert app.toggle(key="cxr_localize").disabled is True  # two images -> single-only
+
+
+def test_cxr_comparison_caption_disclosed(app, png_bytes):
+    assert not any("Comparison mode" in c.value for c in app.caption)
+    app.file_uploader(key="cxr_image1").upload("a.png", png_bytes, "image/png").run()
+    app.file_uploader(key="cxr_image2").upload("b.png", png_bytes, "image/png").run()
+    assert any("Comparison mode" in c.value for c in app.caption)
+
+
+def test_cxr_edit_then_upload_preserves_instruction(app, png_bytes):
+    app.text_area(key="cxr_instruction").set_value("MY CUSTOM INSTRUCTION").run()
+    app.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    assert not app.exception
+    assert app.text_area(key="cxr_instruction").value == "MY CUSTOM INSTRUCTION"
+
+
+def test_cxr_invalid_image_shows_error(app):
+    app.file_uploader(key="cxr_image1").upload(
+        "bad.png", b"not-an-image", "image/png"
+    ).run()
+    assert not app.exception
+    assert any(
+        e.value == "Failed to load image. Please upload a valid image file."
+        for e in app.error
+    )
+    # The upload failed, so the persona stays the single-image default.
+    assert app.text_area(key="cxr_instruction").value == DEFAULT_INSTRUCTION_IMAGE
+
+
+def test_cxr_image_inference_passes_image_to_model(patched_mlx, monkeypatch, png_bytes):
+    captured = {}
+    monkeypatch.setattr(
+        "mlx_vlm.prompt_utils.apply_chat_template",
+        lambda *a, **k: captured.update(act_kwargs=k) or "prompt",
+    )
+    out = MagicMock()
+    out.text = "No acute findings."
+    monkeypatch.setattr(
+        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="cxr_prompt").set_value("Describe this X-ray").run()
+    at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     assert captured["act_kwargs"]["num_images"] == 1
-    img_arg = captured["gen_args"][3]  # 4th positional arg to generate
+    img_arg = captured["gen_args"][3]
     assert isinstance(img_arg, list) and img_arg
     assert "No acute findings." in [m.value for m in at.markdown]
 
 
-def test_localization_lists_detected_structures(patched_mlx, png_bytes):
+def test_cxr_localization_lists_detected_structures(patched_mlx, png_bytes):
     patched_mlx.text = (
         '```json\n[{"box_2d": [100, 100, 500, 500], "label": "right clavicle"}]\n```'
     )
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Where is the right clavicle?").run()
-    at.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
-    at.toggle[1].set_value(True).run()  # enable localization (now that an image exists)
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Where is the right clavicle?").run()
+    at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    at.toggle(key="cxr_localize").set_value(True).run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     markdowns = [m.value for m in at.markdown]
     assert "### Detected structures" in markdowns
@@ -210,51 +321,48 @@ def test_localization_lists_detected_structures(patched_mlx, png_bytes):
     assert "### Response" not in markdowns  # localization replaces the text view
 
 
-def test_localization_passes_square_image_to_model(patched_mlx, monkeypatch, png_bytes):
+def test_cxr_localization_passes_square_image_to_model(patched_mlx, monkeypatch):
     captured = {}
     out = MagicMock()
     out.text = '```json\n[{"box_2d": [0, 0, 1000, 1000], "label": "frame"}]\n```'
     monkeypatch.setattr(
-        "mlx_vlm.generate",
-        lambda *a, **k: captured.update(gen_args=a) or out,
+        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
     )
-    # A non-square PNG so padding is observable.
     buf = io.BytesIO()
-    Image.new("RGB", (20, 10)).save(buf, format="PNG")
+    Image.new("RGB", (20, 10)).save(buf, format="PNG")  # non-square -> padding visible
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Localize the frame").run()
-    at.file_uploader[0].upload("wide.png", buf.getvalue(), "image/png").run()
-    at.toggle[1].set_value(True).run()
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Localize the frame").run()
+    at.file_uploader(key="cxr_image1").upload(
+        "wide.png", buf.getvalue(), "image/png"
+    ).run()
+    at.toggle(key="cxr_localize").set_value(True).run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
-    sent_image = captured["gen_args"][3][0]  # the single image passed to generate
-    assert sent_image.size == (20, 20)  # padded to a square
+    assert captured["gen_args"][3][0].size == (20, 20)  # padded to a square
 
 
-def test_localization_no_boxes_warns(patched_mlx, png_bytes):
+def test_cxr_localization_no_boxes_warns(patched_mlx, png_bytes):
     patched_mlx.text = "I could not localize that structure."
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Where is the spine?").run()
-    at.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
-    at.toggle[1].set_value(True).run()
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Where is the spine?").run()
+    at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    at.toggle(key="cxr_localize").set_value(True).run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
-    assert at.warning[0].value == "No bounding boxes were returned."
+    assert any(w.value == "No bounding boxes were returned." for w in at.warning)
 
 
-def test_localization_with_thinking_renders_both(patched_mlx, png_bytes):
-    # Thinking + localization together: the trace is stripped before parse_boxes,
-    # and both the trace and the detected-structures list render.
+def test_cxr_localization_with_thinking_renders_both(patched_mlx, png_bytes):
     patched_mlx.text = (
         "<unused94>thought\nReasoning about anatomy.<unused95>"
         '```json\n[{"box_2d": [100, 100, 500, 500], "label": "bone"}]\n```'
     )
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Locate the bone").run()
-    at.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
-    at.toggle[0].set_value(True).run()  # thinking
-    at.toggle[1].set_value(True).run()  # localization
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Locate the bone").run()
+    at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    at.toggle(key="cxr_thinking").set_value(True).run()
+    at.toggle(key="cxr_localize").set_value(True).run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     markdowns = [m.value for m in at.markdown]
     assert "Reasoning about anatomy." in markdowns  # thinking trace
@@ -262,55 +370,25 @@ def test_localization_with_thinking_renders_both(patched_mlx, png_bytes):
     assert any("bone" in m for m in markdowns)
 
 
-def test_localization_renders_full_frame_box(patched_mlx, png_bytes):
-    # A degenerate full-frame box is the model's "not here" fallback (e.g. asking
-    # for a femur on a chest X-ray). By design it is treated as a normal detection,
-    # not filtered out — the app renders what the model returns.
+def test_cxr_localization_renders_full_frame_box(patched_mlx, png_bytes):
+    # A degenerate full-frame box is the model's "not here" fallback; by design it is
+    # rendered as a normal detection, not filtered out.
     patched_mlx.text = (
         '```json\n[{"box_2d": [0, 0, 1000, 1000], "label": "femur"}]\n```'
     )
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Where is the femur?").run()
-    at.file_uploader[0].upload("xray.png", png_bytes, "image/png").run()
-    at.toggle[1].set_value(True).run()
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Where is the femur?").run()
+    at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    at.toggle(key="cxr_localize").set_value(True).run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     markdowns = [m.value for m in at.markdown]
     assert "### Detected structures" in markdowns
     assert any("femur" in m for m in markdowns)
-    assert not at.warning  # a full-frame box is a detection, not a "no boxes" case
+    assert not at.warning
 
 
-def test_second_uploader_appears_after_first_image(app, png_bytes):
-    # Only one uploader until the first image exists; then a second slot appears.
-    assert len(app.file_uploader) == 1
-    app.file_uploader[0].upload("first.png", png_bytes, "image/png").run()
-    assert len(app.file_uploader) == 2
-
-
-def test_two_images_switch_to_comparison_instruction(app, png_bytes):
-    app.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    app.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
-    assert not app.exception
-    assert app.text_area[0].value == DEFAULT_INSTRUCTION_COMPARE
-
-
-def test_localization_disabled_with_two_images(app, png_bytes):
-    app.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    assert app.toggle[1].disabled is False  # one image: localization available
-    app.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
-    # Two images: localization is single-image only, so it is disabled again.
-    assert app.toggle[1].disabled is True
-
-
-def test_comparison_caption_disclosed(app, png_bytes):
-    assert not any("Comparison mode" in c.value for c in app.caption)
-    app.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    app.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
-    assert any("Comparison mode" in c.value for c in app.caption)
-
-
-def test_two_image_comparison_passes_both_images(patched_mlx, monkeypatch, png_bytes):
+def test_cxr_comparison_passes_both_images(patched_mlx, monkeypatch, png_bytes):
     captured = {}
     monkeypatch.setattr(
         "mlx_vlm.prompt_utils.apply_chat_template",
@@ -319,46 +397,43 @@ def test_two_image_comparison_passes_both_images(patched_mlx, monkeypatch, png_b
     out = MagicMock()
     out.text = "The second study shows interval improvement."
     monkeypatch.setattr(
-        "mlx_vlm.generate",
-        lambda *a, **k: captured.update(gen_args=a) or out,
+        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
     )
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Compare these studies").run()
-    at.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    at.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Compare these studies").run()
+    at.file_uploader(key="cxr_image1").upload(
+        "before.png", png_bytes, "image/png"
+    ).run()
+    at.file_uploader(key="cxr_image2").upload("after.png", png_bytes, "image/png").run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     assert captured["act_kwargs"]["num_images"] == 2
-    img_arg = captured["gen_args"][3]  # 4th positional arg to generate
+    img_arg = captured["gen_args"][3]
     assert isinstance(img_arg, list) and len(img_arg) == 2
     assert "The second study shows interval improvement." in [
         m.value for m in at.markdown
     ]
 
 
-def test_comparison_uses_larger_token_budget(patched_mlx, monkeypatch, png_bytes):
-    # Two images (no thinking) -> the 600-token comparison budget, not the
-    # single-image 300, reaches generate().
+def test_cxr_comparison_uses_larger_token_budget(patched_mlx, monkeypatch, png_bytes):
     captured = {}
     out = MagicMock()
     out.text = "Comparison."
     monkeypatch.setattr(
-        "mlx_vlm.generate",
-        lambda *a, **k: captured.update(gen_kwargs=k) or out,
+        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_kwargs=k) or out
     )
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Compare these").run()
-    at.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    at.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Compare these").run()
+    at.file_uploader(key="cxr_image1").upload(
+        "before.png", png_bytes, "image/png"
+    ).run()
+    at.file_uploader(key="cxr_image2").upload("after.png", png_bytes, "image/png").run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     assert captured["gen_kwargs"]["max_tokens"] == 600
 
 
-def test_comparison_with_thinking_renders_both(patched_mlx, monkeypatch, png_bytes):
-    # Thinking + comparison together: both images are sent, the trace is stripped
-    # before show_response, and both the trace (in an expander) and the comparison
-    # answer render. Thinking takes precedence, so the 1300-token budget is used.
+def test_cxr_comparison_with_thinking_renders_both(patched_mlx, monkeypatch, png_bytes):
     captured = {}
     monkeypatch.setattr(
         "mlx_vlm.prompt_utils.apply_chat_template",
@@ -369,15 +444,16 @@ def test_comparison_with_thinking_renders_both(patched_mlx, monkeypatch, png_byt
         "The second study shows interval clearing of the left-base opacity."
     )
     monkeypatch.setattr(
-        "mlx_vlm.generate",
-        lambda *a, **k: captured.update(gen_kwargs=k) or patched_mlx,
+        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_kwargs=k) or patched_mlx
     )
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Compare these studies").run()
-    at.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    at.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
-    at.toggle[0].set_value(True).run()  # thinking
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Compare these studies").run()
+    at.file_uploader(key="cxr_image1").upload(
+        "before.png", png_bytes, "image/png"
+    ).run()
+    at.file_uploader(key="cxr_image2").upload("after.png", png_bytes, "image/png").run()
+    at.toggle(key="cxr_thinking").set_value(True).run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     assert captured["act_kwargs"]["num_images"] == 2  # both images still sent
     assert captured["gen_kwargs"]["max_tokens"] == 1600  # thinking+comparison budget
@@ -385,79 +461,60 @@ def test_comparison_with_thinking_renders_both(patched_mlx, monkeypatch, png_byt
     markdowns = [m.value for m in at.markdown]
     assert "Comparing the two studies." in markdowns  # thinking trace
     assert "### Response" in markdowns
-    assert any("interval clearing" in m for m in markdowns)  # comparison answer
+    assert any("interval clearing" in m for m in markdowns)
 
 
-def test_text_only_inference_passes_no_image_to_model(patched_mlx, monkeypatch):
-    # The zero-image branch: image_for_model = [] or None -> None, and num_images 0.
-    captured = {}
-    monkeypatch.setattr(
-        "mlx_vlm.prompt_utils.apply_chat_template",
-        lambda *a, **k: captured.update(act_kwargs=k) or "prompt",
-    )
-    out = MagicMock()
-    out.text = "No acute findings."
-    monkeypatch.setattr(
-        "mlx_vlm.generate",
-        lambda *a, **k: captured.update(gen_args=a) or out,
-    )
-    at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("What is a fracture?").run()
-    at.button[0].click().run()
-    assert not at.exception
-    assert captured["act_kwargs"]["num_images"] == 0
-    assert captured["gen_args"][3] is None  # no image -> None passed positionally
-    assert "No acute findings." in [m.value for m in at.markdown]
-
-
-def test_invalid_second_image_falls_back_to_single_image_mode(app, png_bytes):
-    # A valid first image plus a failed second upload stays in single-image mode:
-    # the error shows, the comparison persona is NOT applied, and localization
-    # (single-image only) remains available.
-    app.file_uploader[0].upload("good.png", png_bytes, "image/png").run()
-    app.file_uploader[1].upload("bad.png", b"not-an-image", "image/png").run()
+def test_cxr_invalid_second_image_falls_back_to_single_image_mode(app, png_bytes):
+    app.file_uploader(key="cxr_image1").upload("good.png", png_bytes, "image/png").run()
+    app.file_uploader(key="cxr_image2").upload(
+        "bad.png", b"not-an-image", "image/png"
+    ).run()
     assert not app.exception
     assert any(
         e.value == "Failed to load image. Please upload a valid image file."
         for e in app.error
     )
-    assert app.text_area[0].value == DEFAULT_INSTRUCTION_IMAGE
+    assert app.text_area(key="cxr_instruction").value == DEFAULT_INSTRUCTION_IMAGE
     assert not any("Comparison mode" in c.value for c in app.caption)
-    assert app.toggle[1].disabled is False  # one valid image -> localization available
+    assert app.toggle(key="cxr_localize").disabled is False  # one valid image
 
 
-def test_edit_then_second_upload_preserves_instruction(app, png_bytes):
-    # A user-edited instruction must survive entering comparison mode (the
-    # comparison persona must not overwrite a touched value).
-    app.text_area[0].set_value("MY CUSTOM INSTRUCTION").run()
-    app.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    app.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
+def test_cxr_edit_then_second_upload_preserves_instruction(app, png_bytes):
+    app.text_area(key="cxr_instruction").set_value("MY CUSTOM INSTRUCTION").run()
+    app.file_uploader(key="cxr_image1").upload(
+        "before.png", png_bytes, "image/png"
+    ).run()
+    app.file_uploader(key="cxr_image2").upload(
+        "after.png", png_bytes, "image/png"
+    ).run()
     assert not app.exception
-    assert app.text_area[0].value == "MY CUSTOM INSTRUCTION"
-    assert app.text_area[0].value != DEFAULT_INSTRUCTION_COMPARE
+    assert app.text_area(key="cxr_instruction").value == "MY CUSTOM INSTRUCTION"
+    assert app.text_area(key="cxr_instruction").value != DEFAULT_INSTRUCTION_COMPARE
 
 
-def test_removing_first_image_collapses_second_slot(app, png_bytes):
-    # The second uploader is nested under `if image1 is not None`; removing the
-    # first image collapses it and reverts an untouched default to the text persona.
-    app.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    app.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
-    assert app.text_area[0].value == DEFAULT_INSTRUCTION_COMPARE
-    assert len(app.file_uploader) == 2
-    app.file_uploader[0].clear().run()
+def test_cxr_removing_first_image_collapses_second_slot(app, png_bytes):
+    app.file_uploader(key="cxr_image1").upload(
+        "before.png", png_bytes, "image/png"
+    ).run()
+    app.file_uploader(key="cxr_image2").upload(
+        "after.png", png_bytes, "image/png"
+    ).run()
+    assert app.text_area(key="cxr_instruction").value == DEFAULT_INSTRUCTION_COMPARE
+    assert "cxr_image2" in [w.key for w in app.file_uploader]
+    app.file_uploader(key="cxr_image1").clear().run()
     assert not app.exception
-    assert len(app.file_uploader) == 1  # second slot is gone once image1 is None
-    assert app.text_area[0].value == DEFAULT_INSTRUCTION_TEXT
+    assert "cxr_image2" not in [w.key for w in app.file_uploader]
+    # Untouched default reverts to the single-image persona (Ask owns text-only).
+    assert app.text_area(key="cxr_instruction").value == DEFAULT_INSTRUCTION_IMAGE
     assert not any("Comparison mode" in c.value for c in app.caption)
 
 
-def test_stale_localization_toggle_runs_comparison_with_two_images(
+def test_cxr_stale_localization_toggle_runs_comparison_with_two_images(
     patched_mlx, monkeypatch, png_bytes
 ):
     # Enabling localization with one image then adding a second leaves the toggle
-    # disabled but its value stale-True. The run-time guard
-    # `localize = is_localizing and len(images) == 1` must force the comparison path
-    # (both images sent, 600-token budget, no localization output).
+    # disabled but stale-True. The run-time guard `localize = is_localizing and
+    # len(images) == 1` must force the comparison path.
     captured = {}
     monkeypatch.setattr(
         "mlx_vlm.prompt_utils.apply_chat_template",
@@ -466,15 +523,16 @@ def test_stale_localization_toggle_runs_comparison_with_two_images(
     out = MagicMock()
     out.text = "Both lungs are clear."
     monkeypatch.setattr(
-        "mlx_vlm.generate",
-        lambda *a, **k: captured.update(gen_kwargs=k) or out,
+        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_kwargs=k) or out
     )
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Compare these").run()
-    at.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    at.toggle[1].set_value(True).run()  # enable localization while single image
-    at.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Compare these").run()
+    at.file_uploader(key="cxr_image1").upload(
+        "before.png", png_bytes, "image/png"
+    ).run()
+    at.toggle(key="cxr_localize").set_value(True).run()  # enabled while single image
+    at.file_uploader(key="cxr_image2").upload("after.png", png_bytes, "image/png").run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     assert captured["act_kwargs"]["num_images"] == 2  # both sent, not a padded single
     assert captured["gen_kwargs"]["max_tokens"] == 600  # comparison budget, not 1000
@@ -484,33 +542,27 @@ def test_stale_localization_toggle_runs_comparison_with_two_images(
     assert not at.warning
 
 
-def test_comparison_sends_unpadded_images(patched_mlx, monkeypatch):
-    # Comparison must send the original images verbatim; pad-to-square is
-    # localization-only. Non-square inputs make any stray padding observable.
+def test_cxr_comparison_sends_unpadded_images(patched_mlx, monkeypatch):
     captured = {}
     out = MagicMock()
     out.text = "Comparison."
     monkeypatch.setattr(
-        "mlx_vlm.generate",
-        lambda *a, **k: captured.update(gen_args=a) or out,
+        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
     )
     buf = io.BytesIO()
     Image.new("RGB", (20, 10)).save(buf, format="PNG")
     wide_png = buf.getvalue()
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Compare these").run()
-    at.file_uploader[0].upload("a.png", wide_png, "image/png").run()
-    at.file_uploader[1].upload("b.png", wide_png, "image/png").run()
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Compare these").run()
+    at.file_uploader(key="cxr_image1").upload("a.png", wide_png, "image/png").run()
+    at.file_uploader(key="cxr_image2").upload("b.png", wide_png, "image/png").run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     img_arg = captured["gen_args"][3]
-    assert isinstance(img_arg, list) and len(img_arg) == 2
     assert [im.size for im in img_arg] == [(20, 10), (20, 10)]  # unpadded originals
 
 
-def test_comparison_labels_images_in_prompt(patched_mlx, monkeypatch, png_bytes):
-    # main() passes "First image:"/"Second image:" labels so the comparison
-    # persona's ordinal wording binds to specific images.
+def test_cxr_comparison_labels_images_in_prompt(patched_mlx, monkeypatch, png_bytes):
     captured = {}
     monkeypatch.setattr(
         "mlx_vlm.prompt_utils.apply_chat_template",
@@ -520,12 +572,188 @@ def test_comparison_labels_images_in_prompt(patched_mlx, monkeypatch, png_bytes)
     out.text = "Comparison."
     monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
-    at.text_input[0].set_value("Compare these").run()
-    at.file_uploader[0].upload("before.png", png_bytes, "image/png").run()
-    at.file_uploader[1].upload("after.png", png_bytes, "image/png").run()
-    at.button[0].click().run()
+    at.text_input(key="cxr_prompt").set_value("Compare these").run()
+    at.file_uploader(key="cxr_image1").upload(
+        "before.png", png_bytes, "image/png"
+    ).run()
+    at.file_uploader(key="cxr_image2").upload("after.png", png_bytes, "image/png").run()
+    at.button(key="cxr_run").click().run()
     assert not at.exception
     messages = captured["args"][2]  # 3rd positional arg to apply_chat_template
     user_texts = [p["text"] for p in messages[1]["content"] if p["type"] == "text"]
     assert "First image:" in user_texts
     assert "Second image:" in user_texts
+
+
+# --------------------------------------------------------------------------- #
+# Computed Tomography tab (DICOM -> windowing -> multi-slice)
+# --------------------------------------------------------------------------- #
+
+
+def test_ct_default_instruction_is_ct_persona(app):
+    assert app.text_area(key="ct_instruction").value == DEFAULT_INSTRUCTION_CT
+
+
+def test_ct_caption_describes_dicom_upload(app):
+    assert any("DICOM" in c.value for c in app.caption)
+
+
+def test_ct_slider_present_or_memory_capped(app):
+    # The slice slider is RAM-aware; on a very low-memory host it collapses to a
+    # fixed 2-slice cap with a caption instead.
+    slider_present = "ct_slices" in [w.key for w in app.slider]
+    memory_capped = any("Limited memory" in c.value for c in app.caption)
+    assert slider_present or memory_capped
+
+
+def test_ct_run_requires_prompt_and_files(app, png_bytes):
+    assert app.button(key="ct_run").disabled is True
+    app.text_input(key="ct_prompt").set_value("Any lesions?").run()
+    assert app.button(key="ct_run").disabled is True  # prompt but no files
+    _upload_ct_pair(app)
+    assert app.button(key="ct_run").disabled is False
+
+
+def test_ct_inference_passes_windowed_slices(patched_mlx, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "mlx_vlm.prompt_utils.apply_chat_template",
+        lambda *a, **k: captured.update(act_kwargs=k) or "prompt",
+    )
+    out = MagicMock()
+    out.text = "Two contiguous slices of the liver."
+    monkeypatch.setattr(
+        "mlx_vlm.generate",
+        lambda *a, **k: captured.update(gen_args=a, gen_kwargs=k) or out,
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ct_prompt").set_value("Are there hypodense lesions?").run()
+    _upload_ct_pair(at)
+    at.button(key="ct_run").click().run()
+    assert not at.exception
+    assert captured["act_kwargs"]["num_images"] == 2
+    img_arg = captured["gen_args"][3]
+    assert isinstance(img_arg, list) and len(img_arg) == 2
+    assert all(im.mode == "RGB" for im in img_arg)  # windowed to false-color RGB
+    assert captured["gen_kwargs"]["max_tokens"] == 2000  # CT multi-slice budget
+    assert "Two contiguous slices of the liver." in [m.value for m in at.markdown]
+
+
+def test_ct_labels_slices_in_prompt(patched_mlx, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "mlx_vlm.prompt_utils.apply_chat_template",
+        lambda *a, **k: captured.update(args=a) or "prompt",
+    )
+    out = MagicMock()
+    out.text = "Findings."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ct_prompt").set_value("Describe the volume").run()
+    _upload_ct_pair(at)
+    at.button(key="ct_run").click().run()
+    assert not at.exception
+    messages = captured["args"][2]
+    user_texts = [p["text"] for p in messages[1]["content"] if p["type"] == "text"]
+    assert "SLICE 1" in user_texts
+    assert "SLICE 2" in user_texts
+
+
+def test_ct_with_thinking_uses_larger_budget(patched_mlx, monkeypatch):
+    captured = {}
+    patched_mlx.text = (
+        "<unused94>thought\nReviewing each slice.<unused95>No focal lesion."
+    )
+    monkeypatch.setattr(
+        "mlx_vlm.generate",
+        lambda *a, **k: captured.update(gen_kwargs=k) or patched_mlx,
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ct_prompt").set_value("Any lesions?").run()
+    _upload_ct_pair(at)
+    at.toggle(key="ct_thinking").set_value(True).run()
+    at.button(key="ct_run").click().run()
+    assert not at.exception
+    assert captured["gen_kwargs"]["max_tokens"] == 2500  # thinking + CT budget
+    assert len(at.expander) == 1  # thinking trace
+    markdowns = [m.value for m in at.markdown]
+    assert "Reviewing each slice." in markdowns
+    assert "No focal lesion." in markdowns
+
+
+def test_ct_invalid_dicom_shows_error(patched_mlx):
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ct_prompt").set_value("Describe this").run()
+    at.file_uploader(key="ct_files").upload(
+        "bad.dcm", b"not-a-dicom", "application/dicom"
+    ).run()
+    at.button(key="ct_run").click().run()
+    assert not at.exception
+    assert any("Failed to read DICOM series" in e.value for e in at.error)
+    assert "### Response" not in [m.value for m in at.markdown]
+
+
+def test_ct_subsamples_to_slider_count(patched_mlx, monkeypatch):
+    # The slider value (not the upload count) drives how many windowed slices reach
+    # the model: upload 6, request 4, expect 4.
+    _force_ram_gib(monkeypatch, 32)  # deterministic slider range (max 16)
+    captured = {}
+    monkeypatch.setattr(
+        "mlx_vlm.prompt_utils.apply_chat_template",
+        lambda *a, **k: captured.update(act_kwargs=k) or "prompt",
+    )
+    out = MagicMock()
+    out.text = "Findings."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ct_prompt").set_value("Describe the volume").run()
+    uploader = at.file_uploader(key="ct_files")
+    for i in range(1, 7):  # six single-series slices
+        uploader = uploader.upload(
+            f"s{i}.dcm", _dicom_bytes(i, 100 + i), "application/dicom"
+        )
+    uploader.run()
+    at.slider(key="ct_slices").set_value(4).run()
+    at.button(key="ct_run").click().run()
+    assert not at.exception
+    assert captured["act_kwargs"]["num_images"] == 4  # subsampled from 6 to 4
+
+
+def test_ct_slider_default_reflects_ram(patched_mlx, monkeypatch):
+    _force_ram_gib(monkeypatch, 32)  # ram_aware_slice_cap -> (default 8, max 16)
+    at = AppTest.from_file(APP_PATH).run()
+    assert at.slider(key="ct_slices").value == 8
+
+
+def test_ct_memory_capped_shows_caption_not_slider(patched_mlx, monkeypatch):
+    _force_ram_gib(monkeypatch, 16)  # below base + headroom -> (2, 2): no slider
+    at = AppTest.from_file(APP_PATH).run()
+    assert "ct_slices" not in [w.key for w in at.slider]
+    assert any("Limited memory" in c.value for c in at.caption)
+
+
+def test_ct_rejects_mixed_series_with_error(patched_mlx):
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ct_prompt").set_value("Describe").run()
+    at.file_uploader(key="ct_files").upload(
+        "a.dcm", _dicom_bytes(1, 100, series_uid="1.2.3"), "application/dicom"
+    ).upload(
+        "b.dcm", _dicom_bytes(2, 200, series_uid="1.2.4"), "application/dicom"
+    ).run()
+    at.button(key="ct_run").click().run()
+    assert not at.exception
+    assert any("Multiple DICOM series" in e.value for e in at.error)
+    assert "### Response" not in [m.value for m in at.markdown]
+
+
+def test_ct_multi_frame_shows_error_not_crash(patched_mlx):
+    # A multi-frame DICOM (3D pixel array) must surface the friendly error, not an
+    # unhandled traceback from window_ct_slice.
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ct_prompt").set_value("Describe").run()
+    at.file_uploader(key="ct_files").upload(
+        "vol.dcm", _dicom_bytes(1, 100, frames=3), "application/dicom"
+    ).run()
+    at.button(key="ct_run").click().run()
+    assert not at.exception
+    assert any("single-frame" in e.value for e in at.error)

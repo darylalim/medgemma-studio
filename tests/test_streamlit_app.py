@@ -1,16 +1,28 @@
+import os
+import subprocess
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 from PIL import Image
 
 from streamlit_app import (
     LOCALIZATION_INSTRUCTION,
+    _detect_total_ram_gib,
     build_messages,
     draw_boxes,
     get_generation_params,
+    load_ct_volume,
+    normalize_hu,
     pad_to_square,
     parse_boxes,
     parse_response,
+    ram_aware_slice_cap,
     scale_box,
+    subsample_indices,
+    window_ct_slice,
 )
+from tests.dicom_helpers import dicom_bytes as _dicom_bytes
 
 THINKING_INSTRUCTION = "SYSTEM INSTRUCTION: think silently if needed. Be helpful."
 
@@ -180,6 +192,26 @@ class TestGetGenerationParams:
         assert instruction == LOCALIZATION_INSTRUCTION
         assert tokens == expected_tokens
 
+    @pytest.mark.parametrize(
+        "is_thinking, expected_instruction, expected_tokens",
+        [
+            (False, "Be helpful.", 2000),
+            (True, THINKING_INSTRUCTION, 2500),
+        ],
+        ids=["ct", "ct+thinking"],
+    )
+    def test_ct_params(self, is_thinking, expected_instruction, expected_tokens):
+        # CT keeps the editable persona but allocates a large multi-slice budget;
+        # thinking takes precedence and bumps the budget further.
+        instruction, tokens = get_generation_params(
+            has_image=True,
+            is_thinking=is_thinking,
+            system_instruction="Be helpful.",
+            is_ct=True,
+        )
+        assert instruction == expected_instruction
+        assert tokens == expected_tokens
+
 
 class TestPadToSquare:
     def test_already_square_unchanged(self):
@@ -331,3 +363,162 @@ class TestDrawBoxes:
         cropped = annotated.crop((0, 0, original.width, original.height))
         assert cropped.size == (10, 20)
         assert cropped.getpixel((0, 10)) == (255, 0, 0)  # left edge survives the crop
+
+
+class TestNormalizeHu:
+    def test_clamps_below_window_to_zero(self):
+        assert normalize_hu(np.array([-2000.0]), -1024, 1024)[0] == 0.0
+
+    def test_clamps_above_window_to_255(self):
+        assert normalize_hu(np.array([5000.0]), -1024, 1024)[0] == 255.0
+
+    def test_midpoint_is_half_scale(self):
+        # HU 0 sits halfway through the wide window -> 127.5.
+        assert normalize_hu(np.array([0.0]), -1024, 1024)[0] == pytest.approx(127.5)
+
+    def test_linear_within_window(self):
+        # 20 is a quarter of the [0, 80] brain window.
+        assert normalize_hu(np.array([20.0]), 0, 80)[0] == pytest.approx(0.25 * 255)
+
+    def test_preserves_shape(self):
+        assert normalize_hu(np.zeros((3, 4)), -1024, 1024).shape == (3, 4)
+
+
+class TestWindowCtSlice:
+    def test_returns_rgb_image_same_hw(self):
+        img = window_ct_slice(np.zeros((8, 6)))
+        assert isinstance(img, Image.Image)
+        assert img.mode == "RGB"
+        assert img.size == (6, 8)  # PIL size is (width, height)
+
+    def test_channel_values_for_constant_slice(self):
+        # HU 0 everywhere, per CT_WINDOWS:
+        #   R wide  (-1024, 1024): (0+1024)/2048*255 = 127.5 -> 128
+        #   G soft  (-135, 215):   (0+135)/350*255   = 98.36 -> 98
+        #   B brain (0, 80):       (0-0)/80*255       = 0
+        img = window_ct_slice(np.zeros((2, 2)))
+        assert img.getpixel((0, 0)) == (128, 98, 0)
+
+    def test_respects_custom_windows(self):
+        # Three identical windows -> a gray image; HU 50 of [0,100] -> 127.5 -> 128.
+        img = window_ct_slice(
+            np.full((2, 2), 50.0), windows=[(0, 100), (0, 100), (0, 100)]
+        )
+        assert img.getpixel((0, 0)) == (128, 128, 128)
+
+
+class TestSubsampleIndices:
+    def test_returns_all_when_fewer_than_cap(self):
+        assert subsample_indices(3, 10) == [0, 1, 2]
+
+    def test_returns_all_when_equal_to_cap(self):
+        assert subsample_indices(5, 5) == [0, 1, 2, 3, 4]
+
+    def test_empty_volume(self):
+        assert subsample_indices(0, 8) == []
+
+    def test_even_spread_includes_endpoints(self):
+        assert subsample_indices(10, 4) == [0, 3, 6, 9]
+
+    def test_cap_of_one_picks_middle(self):
+        assert subsample_indices(10, 1) == [5]
+
+    def test_never_exceeds_cap_and_spans_volume(self):
+        idx = subsample_indices(100, 16)
+        assert len(idx) == 16
+        assert idx[0] == 0
+        assert idx[-1] == 99
+
+    def test_indices_sorted_and_in_range(self):
+        idx = subsample_indices(57, 13)
+        assert idx == sorted(idx)
+        assert all(0 <= i < 57 for i in idx)
+
+
+class TestLoadCtVolume:
+    def test_sorts_by_instance_number_and_converts_to_hu(self):
+        # Files out of order; the fill value encodes order so we can verify sorting.
+        files = [_dicom_bytes(3, 300), _dicom_bytes(1, 100), _dicom_bytes(2, 200)]
+        vol = load_ct_volume(files, max_slices=10)
+        assert len(vol) == 3
+        # Sorted 1,2,3 -> fills 100,200,300; HU = fill + intercept(-1024).
+        assert [v[0, 0] for v in vol] == [100 - 1024, 200 - 1024, 300 - 1024]
+
+    def test_subsamples_to_cap(self):
+        files = [_dicom_bytes(i, 100 + i) for i in range(1, 21)]  # 20 slices
+        assert len(load_ct_volume(files, max_slices=5)) == 5
+
+    def test_applies_rescale_slope_and_intercept(self):
+        files = [_dicom_bytes(1, 10, slope=2.0, intercept=-1000.0)]
+        assert load_ct_volume(files, max_slices=4)[0][0, 0] == 10 * 2.0 - 1000.0
+
+    def test_rejects_multiple_series(self):
+        # Mixing series would interleave anatomically unrelated slices into one
+        # bogus volume, so it is rejected rather than silently merged.
+        files = [
+            _dicom_bytes(1, 100, series_uid="1.2.3"),
+            _dicom_bytes(2, 200, series_uid="1.2.4"),
+        ]
+        with pytest.raises(ValueError, match="Multiple DICOM series"):
+            load_ct_volume(files, max_slices=10)
+
+    def test_rejects_multi_frame_slice(self):
+        # A multi-frame DICOM yields a 3D pixel array that window_ct_slice (run
+        # outside the caller's try/except) cannot handle, so it is rejected here.
+        with pytest.raises(ValueError, match="single-frame"):
+            load_ct_volume([_dicom_bytes(1, 100, frames=3)], max_slices=4)
+
+
+class TestRamAwareSliceCap:
+    def test_32gib_yields_8_and_16(self):
+        assert ram_aware_slice_cap(total_ram_gib=32) == (8, 16)
+
+    def test_scales_up_with_more_ram(self):
+        default, maximum = ram_aware_slice_cap(total_ram_gib=64)
+        assert maximum > 16
+        assert default <= maximum
+
+    def test_clamped_to_hard_max(self):
+        _, maximum = ram_aware_slice_cap(total_ram_gib=512)
+        assert maximum == 64
+
+    def test_floors_on_low_ram(self):
+        # Below base + headroom -> the 2-slice floor, never zero or negative.
+        assert ram_aware_slice_cap(total_ram_gib=16) == (2, 2)
+
+    def test_default_never_exceeds_max(self):
+        for ram in (16, 24, 32, 48, 64, 128):
+            default, maximum = ram_aware_slice_cap(total_ram_gib=ram)
+            assert 2 <= default <= maximum
+
+
+class TestDetectTotalRamGib:
+    def test_sysconf_branch(self, monkeypatch):
+        # 32 GiB via SC_PHYS_PAGES * SC_PAGE_SIZE.
+        monkeypatch.setattr(
+            os, "sysconf_names", {"SC_PHYS_PAGES": 0, "SC_PAGE_SIZE": 1}
+        )
+        pages = 32 * 1024**3 // 4096
+        monkeypatch.setattr(
+            os, "sysconf", lambda n: pages if n == "SC_PHYS_PAGES" else 4096
+        )
+        assert _detect_total_ram_gib() == 32.0
+
+    def test_sysctl_fallback_when_sysconf_unavailable(self, monkeypatch):
+        # No sysconf keys -> parse `sysctl -n hw.memsize`.
+        monkeypatch.setattr(os, "sysconf_names", {})
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda *a, **k: SimpleNamespace(stdout=f"{32 * 1024**3}\n"),
+        )
+        assert _detect_total_ram_gib() == 32.0
+
+    def test_conservative_default_when_both_fail(self, monkeypatch):
+        monkeypatch.setattr(os, "sysconf_names", {})
+
+        def _raise(*a, **k):
+            raise OSError("no sysctl")
+
+        monkeypatch.setattr(subprocess, "run", _raise)
+        assert _detect_total_ram_gib() == 16.0
