@@ -1,14 +1,14 @@
 # MedGemma Pipeline
 
-Analyze medical text and images with the Google [MedGemma 1.5](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) model on Apple Silicon with MLX.
+Analyze medical text, 2D images (e.g. chest X-ray), and 3D CT volumes with the Google [MedGemma 1.5](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) model on Apple Silicon with MLX.
 
 ## Features
 
-- Single-column UI with text input and optional image upload
-- Always-visible system instruction and thinking toggle
-- System instruction auto-adjusts based on whether one image, two images, or no image is attached
-- Optional "Locate anatomy" mode that draws labeled bounding boxes on the image
-- Longitudinal comparison: attach a second image to compare two studies in one prompt
+- Three tabs, each with its own system instruction and thinking toggle:
+  - **Ask** — text-only medical Q&A
+  - **Chest X-ray** — analyze one image, compare two studies (longitudinal), or draw labeled anatomy bounding boxes ("Locate anatomy")
+  - **Computed Tomography** — upload a DICOM series; each slice is windowed into MedGemma's trained false-color (Hounsfield-unit) representation and read as a stack
+- RAM-aware CT slice cap (multi-image inference is memory-heavy on unified memory)
 - Fully local inference on Apple Silicon via MLX
 
 ## Setup
@@ -37,9 +37,11 @@ HF_TOKEN=your_token_here
 uv run streamlit run streamlit_app.py
 ```
 
-To locate anatomy, upload an image, enable **Locate anatomy**, enter a query (e.g. "Where is the right clavicle?"), and run. The app draws labeled bounding boxes; this mode uses a built-in localization prompt and ignores the system instruction.
+The app opens with three tabs:
 
-To compare two studies (e.g. a longitudinal chest X-ray), upload a first image, then upload a second image in the slot that appears. The app enters comparison mode automatically, sends both images in one prompt, and asks the model to describe the changes. (Localization is single-image only and is disabled when two images are attached.)
+- **Ask** — enter a question and run for a text-only answer.
+- **Chest X-ray** — upload an image and run for analysis. To **locate anatomy**, enable the toggle and ask e.g. *"Where is the right clavicle?"*; the app draws labeled bounding boxes (this mode uses a built-in prompt and ignores the system instruction). To **compare** two studies, upload a first image, then a second in the slot that appears — the app sends both in one prompt and describes the changes. (Localization is single-image only and is disabled with two images.)
+- **Computed Tomography** — upload a CT series as individual DICOM (`.dcm`) slice files (multi-select), choose how many slices to analyze, enter a question, and run. Each slice is windowed into a false-color image before analysis.
 
 ## Development
 
