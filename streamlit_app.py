@@ -21,6 +21,13 @@ MODEL_ID = "mlx-community/medgemma-1.5-4b-it-bf16"
 
 IMAGE_TYPES = ["png", "jpg", "jpeg", "webp"]
 
+# Greedy decoding (temperature 0) can fall into degenerate repetition loops on
+# longer generations (e.g. a multi-slice CT read). A repetition penalty over a wide
+# context breaks them while staying deterministic; verified not to corrupt the
+# localization JSON output.
+REPETITION_PENALTY = 1.3
+REPETITION_CONTEXT_SIZE = 256
+
 DEFAULT_INSTRUCTION_IMAGE = "You are an expert radiologist."
 DEFAULT_INSTRUCTION_TEXT = "You are a helpful medical assistant."
 DEFAULT_INSTRUCTION_COMPARE = (
@@ -347,6 +354,8 @@ def run_model(model, processor, config, messages, images, max_new_tokens):
                 image_for_model,  # ty: ignore[invalid-argument-type]
                 max_tokens=max_new_tokens,
                 temperature=0.0,
+                repetition_penalty=REPETITION_PENALTY,
+                repetition_context_size=REPETITION_CONTEXT_SIZE,
                 verbose=False,
             )
             return output.text

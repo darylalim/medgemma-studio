@@ -12,6 +12,8 @@ from streamlit_app import (
     DEFAULT_INSTRUCTION_CT,
     DEFAULT_INSTRUCTION_IMAGE,
     DEFAULT_INSTRUCTION_TEXT,
+    REPETITION_CONTEXT_SIZE,
+    REPETITION_PENALTY,
 )
 from tests.dicom_helpers import dicom_bytes
 
@@ -192,6 +194,23 @@ def test_ask_inference_failure_renders_error(patched_mlx, monkeypatch):
     assert "### Response" not in [m.value for m in at.markdown]
 
 
+def test_repetition_penalty_passed_to_generate(patched_mlx, monkeypatch):
+    # Greedy decoding loops without a repetition penalty; guard that run_model
+    # always passes it (and the context size) to generate().
+    captured = {}
+    out = MagicMock()
+    out.text = "ok"
+    monkeypatch.setattr(
+        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_kwargs=k) or out
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ask_prompt").set_value("Why?").run()
+    at.button(key="ask_run").click().run()
+    assert not at.exception
+    assert captured["gen_kwargs"]["repetition_penalty"] == REPETITION_PENALTY
+    assert captured["gen_kwargs"]["repetition_context_size"] == REPETITION_CONTEXT_SIZE
+
+
 def test_ask_passes_no_image_to_model(patched_mlx, monkeypatch):
     captured = {}
     monkeypatch.setattr(
@@ -326,7 +345,8 @@ def test_cxr_localization_passes_square_image_to_model(patched_mlx, monkeypatch)
     out = MagicMock()
     out.text = '```json\n[{"box_2d": [0, 0, 1000, 1000], "label": "frame"}]\n```'
     monkeypatch.setattr(
-        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
+        "mlx_vlm.generate",
+        lambda *a, **k: captured.update(gen_args=a, gen_kwargs=k) or out,
     )
     buf = io.BytesIO()
     Image.new("RGB", (20, 10)).save(buf, format="PNG")  # non-square -> padding visible
@@ -339,6 +359,9 @@ def test_cxr_localization_passes_square_image_to_model(patched_mlx, monkeypatch)
     at.button(key="cxr_run").click().run()
     assert not at.exception
     assert captured["gen_args"][3][0].size == (20, 20)  # padded to a square
+    # The loop-guard penalty applies to the localization path too.
+    assert captured["gen_kwargs"]["repetition_penalty"] == REPETITION_PENALTY
+    assert captured["gen_kwargs"]["repetition_context_size"] == REPETITION_CONTEXT_SIZE
 
 
 def test_cxr_localization_no_boxes_warns(patched_mlx, png_bytes):
@@ -431,6 +454,7 @@ def test_cxr_comparison_uses_larger_token_budget(patched_mlx, monkeypatch, png_b
     at.button(key="cxr_run").click().run()
     assert not at.exception
     assert captured["gen_kwargs"]["max_tokens"] == 600
+    assert captured["gen_kwargs"]["repetition_penalty"] == REPETITION_PENALTY
 
 
 def test_cxr_comparison_with_thinking_renders_both(patched_mlx, monkeypatch, png_bytes):
@@ -636,6 +660,10 @@ def test_ct_inference_passes_windowed_slices(patched_mlx, monkeypatch):
     assert isinstance(img_arg, list) and len(img_arg) == 2
     assert all(im.mode == "RGB" for im in img_arg)  # windowed to false-color RGB
     assert captured["gen_kwargs"]["max_tokens"] == 2000  # CT multi-slice budget
+    # The repetition penalty must reach the CT path — that's where greedy decoding
+    # looped before the fix.
+    assert captured["gen_kwargs"]["repetition_penalty"] == REPETITION_PENALTY
+    assert captured["gen_kwargs"]["repetition_context_size"] == REPETITION_CONTEXT_SIZE
     assert "Two contiguous slices of the liver." in [m.value for m in at.markdown]
 
 
