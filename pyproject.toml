@@ -5,21 +5,21 @@ description = "Analyze medical text, 2D images, 3D CT volumes, and whole-slide p
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
-    "mlx-vlm",
-    "numpy>=2.4.4",
-    "openslide-bin>=4.0.1.1",
+    "mlx-vlm>=0.6.3",
+    "numpy>=2.4.6",
+    "openslide-bin>=4.0.1.2",
     "openslide-python>=1.4.6",
     "pillow",
     "pydicom>=3.0.2",
     "python-dotenv",
-    "streamlit>=1.56",
+    "streamlit>=1.58",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest",
-    "ruff",
-    "ty",
+    "pytest>=9.1.1",
+    "ruff>=0.15.18",
+    "ty>=0.0.51",
 ]
 
 [tool.pytest.ini_options]
