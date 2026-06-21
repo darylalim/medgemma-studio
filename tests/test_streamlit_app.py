@@ -679,12 +679,12 @@ def _tissue_thumbnail(size=(800, 800)):
 
 
 def _make_slide(**overrides):
-    kwargs = dict(
-        level_dimensions=[(3000, 3000)],
-        level_downsamples=[1.0],
-        properties={"openslide.objective-power": "40"},
-        thumbnail=_tissue_thumbnail(),
-    )
+    kwargs = {
+        "level_dimensions": [(3000, 3000)],
+        "level_downsamples": [1.0],
+        "properties": {"openslide.objective-power": "40"},
+        "thumbnail": _tissue_thumbnail(),
+    }
     kwargs.update(overrides)
     return _FakeSlide(**kwargs)
 

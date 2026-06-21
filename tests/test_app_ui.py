@@ -56,7 +56,7 @@ def png_bytes():
 
 
 def _dicom_bytes(*args, **kwargs):
-    """Raw bytes of an in-memory CT DICOM slice, for AppTest's file_uploader.upload()."""
+    """Raw bytes of an in-memory CT DICOM slice, for file_uploader.upload()."""
     return dicom_bytes(*args, **kwargs).getvalue()
 
 
@@ -76,7 +76,7 @@ def _force_ram_gib(monkeypatch, gib):
 
 
 def _upload_ct_pair(at):
-    """Upload two DICOM slices to the CT tab (chained: AppTest replaces, not appends)."""
+    """Upload two slices to the CT tab (chained: AppTest replaces, not appends)."""
     at.file_uploader(key="ct_files").upload(
         "a.dcm", _dicom_bytes(2, 200), "application/dicom"
     ).upload("b.dcm", _dicom_bytes(1, 100), "application/dicom").run()

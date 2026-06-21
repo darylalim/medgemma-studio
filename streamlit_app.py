@@ -473,7 +473,9 @@ def load_wsi_patches(
     tissue.
     """
     suffix = os.path.splitext(getattr(uploaded_file, "name", "") or "")[1] or ".svs"
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    # delete=False (not a `with`): OpenSlide opens by path, so the file must outlive
+    # this scope; it is unlinked in the finally below.
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)  # noqa: SIM115
     path = tmp.name
     try:
         # Bind ``path`` and enter the cleanup scope before writing, so a failed write
