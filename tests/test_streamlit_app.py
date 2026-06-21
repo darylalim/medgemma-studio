@@ -502,6 +502,17 @@ class TestLoadCtVolume:
         with pytest.raises(ValueError, match="single-frame"):
             load_ct_volume([_dicom_bytes(1, 100, frames=3)], max_slices=4)
 
+    def test_rereads_same_streams_after_position_advances(self):
+        # Streamlit keeps the uploaded BytesIO objects in session_state, so a
+        # second Run re-reads the SAME streams. dcmread advances the file position,
+        # so without an internal rewind the second pass would raise
+        # InvalidDicomError. Reuse one list across two calls to lock in the rewind.
+        files = [_dicom_bytes(2, 200), _dicom_bytes(1, 100)]
+        first = load_ct_volume(files, max_slices=10)
+        second = load_ct_volume(files, max_slices=10)
+        assert len(first) == len(second) == 2
+        assert [v[0, 0] for v in second] == [v[0, 0] for v in first]
+
 
 class TestRamAwareSliceCap:
     def test_32gib_yields_8_and_16(self):

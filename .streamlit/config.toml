@@ -1,0 +1,21 @@
+# Clinical light theme: a calm, single restrained blue accent on a clean white
+# canvas. Light base is appropriate for a diagnostic-imaging tool — medical
+# images (CXR, windowed CT, WSI patches) are reviewed against neutral light
+# backgrounds, and a light UI keeps the surrounding chrome from tinting them.
+# Only [theme] is defined (no [theme.dark]), so the app stays in one locked mode.
+[theme]
+base = "light"
+primaryColor = "#0b6bcb"              # restrained clinical blue; dark enough for white button text
+backgroundColor = "#ffffff"           # main canvas (lightest layer)
+secondaryBackgroundColor = "#f4f7fb"  # widget / code / expander backgrounds (slightly darker)
+textColor = "#1f2933"                 # near-black body text, WCAG AA on white
+linkColor = "#0b6bcb"
+borderColor = "#d7dee8"
+baseRadius = "8px"
+linkUnderline = false
+
+# Semantic palette for status callouts (st.error / st.warning / status badges)
+redColor = "#c0392b"
+orangeColor = "#b7791f"
+greenColor = "#1a7f5a"
+blueColor = "#0b6bcb"

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import streamlit as st
 from PIL import Image
 from streamlit.testing.v1 import AppTest
 
@@ -20,6 +21,17 @@ from streamlit_app import (
 from tests.dicom_helpers import dicom_bytes
 
 APP_PATH = str(Path(__file__).parent.parent / "streamlit_app.py")
+
+
+@pytest.fixture(autouse=True)
+def _clear_caches():
+    """Reset Streamlit's resource/data caches before each test. AppTest does not
+    clear them between runs, so the @st.cache_data RAM value (which _force_ram_gib
+    varies per test) and the @st.cache_resource model would otherwise leak across
+    tests in a session and make slice/patch-cap assertions order-dependent."""
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    yield
 
 
 @pytest.fixture
@@ -136,11 +148,13 @@ def test_title_renders(app):
 
 
 def test_four_tabs_render(app):
+    # Tab labels carry inline Material Symbol icons; AppTest reports the raw label
+    # markup (the :material/...: token), not the rendered glyph.
     assert [t.label for t in app.tabs] == [
-        "Ask",
-        "Chest X-ray",
-        "Computed Tomography",
-        "Pathology (WSI)",
+        ":material/forum: Ask",
+        ":material/radiology: Chest X-ray",
+        ":material/readiness_score: Computed Tomography",
+        ":material/biotech: Pathology (WSI)",
     ]
 
 
@@ -280,6 +294,49 @@ def test_ask_passes_no_image_to_model(patched_mlx, monkeypatch):
     assert not at.exception
     assert captured["act_kwargs"]["num_images"] == 0
     assert captured["gen_args"][3] is None  # no image -> None passed positionally
+
+
+def test_ask_result_persists_across_rerun(patched_mlx):
+    # Regression for the vanish-on-rerun bug: a result must survive a later widget
+    # interaction that does not re-click Run (before the session-state fix, the
+    # early-return on a False button wiped the response).
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ask_prompt").set_value("What is a fracture?").run()
+    at.button(key="ask_run").click().run()
+    assert "No acute findings." in [m.value for m in at.markdown]
+    at.toggle(key="ask_thinking").set_value(True).run()  # unrelated rerun, no click
+    assert not at.exception
+    assert "No acute findings." in [m.value for m in at.markdown]
+
+
+def test_ask_does_not_rerun_inference_on_unrelated_rerun(patched_mlx, monkeypatch):
+    # The persisted result must be served from session_state, NOT recomputed: a
+    # rerun without a fresh Run click must not call generate() again.
+    calls = []
+    out = MagicMock()
+    out.text = "Cached answer."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: calls.append(1) or out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ask_prompt").set_value("Why?").run()
+    at.button(key="ask_run").click().run()
+    assert len(calls) == 1
+    at.toggle(key="ask_thinking").set_value(True).run()  # no new click
+    assert not at.exception
+    assert len(calls) == 1  # inference not re-run
+    assert "Cached answer." in [m.value for m in at.markdown]
+
+
+def test_ask_stale_result_cleared_when_prompt_changes(patched_mlx):
+    # Persistence must not outlive the inputs: editing the prompt without clicking
+    # Run drops the now-stale answer (its stored signature no longer matches).
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ask_prompt").set_value("What is a fracture?").run()
+    at.button(key="ask_run").click().run()
+    assert "No acute findings." in [m.value for m in at.markdown]
+    at.text_input(key="ask_prompt").set_value("What is pneumonia?").run()  # no re-run
+    assert not at.exception
+    assert "No acute findings." not in [m.value for m in at.markdown]
+    assert "### Response" not in [m.value for m in at.markdown]
 
 
 # --------------------------------------------------------------------------- #
@@ -661,6 +718,68 @@ def test_cxr_comparison_labels_images_in_prompt(patched_mlx, monkeypatch, png_by
     assert "Second image:" in user_texts
 
 
+def test_cxr_result_persists_across_rerun(patched_mlx, png_bytes):
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="cxr_prompt").set_value("Describe this X-ray").run()
+    at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    at.button(key="cxr_run").click().run()
+    assert "No acute findings." in [m.value for m in at.markdown]
+    at.toggle(key="cxr_thinking").set_value(True).run()  # unrelated rerun, no click
+    assert not at.exception
+    assert "No acute findings." in [m.value for m in at.markdown]
+
+
+def test_cxr_localization_persists_across_rerun(patched_mlx, png_bytes):
+    # The drawn annotation + structure list must survive a rerun too (it is stored
+    # finished in session_state, so it is not redrawn on every rerun).
+    patched_mlx.text = (
+        '```json\n[{"box_2d": [100, 100, 500, 500], "label": "right clavicle"}]\n```'
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="cxr_prompt").set_value("Where is the right clavicle?").run()
+    at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    at.toggle(key="cxr_localize").set_value(True).run()
+    at.button(key="cxr_run").click().run()
+    assert "### Detected structures" in [m.value for m in at.markdown]
+    at.toggle(key="cxr_thinking").set_value(True).run()  # unrelated rerun, no click
+    assert not at.exception
+    markdowns = [m.value for m in at.markdown]
+    assert "### Detected structures" in markdowns
+    assert any("right clavicle" in m for m in markdowns)
+
+
+def test_cxr_stale_text_result_cleared_when_second_image_added(patched_mlx, png_bytes):
+    # A single-image answer must not linger once a second image switches the tab to
+    # comparison mode (the result's signature includes the second upload).
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="cxr_prompt").set_value("Describe this X-ray").run()
+    at.file_uploader(key="cxr_image1").upload("a.png", png_bytes, "image/png").run()
+    at.button(key="cxr_run").click().run()
+    assert "### Response" in [m.value for m in at.markdown]
+    at.file_uploader(key="cxr_image2").upload("b.png", png_bytes, "image/png").run()
+    assert not at.exception
+    assert "No acute findings." not in [m.value for m in at.markdown]
+    assert "### Response" not in [m.value for m in at.markdown]
+
+
+def test_cxr_stale_localization_cleared_when_localize_toggled_off(
+    patched_mlx, png_bytes
+):
+    # The drawn annotation is stale once localization is turned off without re-running.
+    patched_mlx.text = (
+        '```json\n[{"box_2d": [100, 100, 500, 500], "label": "rib"}]\n```'
+    )
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="cxr_prompt").set_value("Where is the rib?").run()
+    at.file_uploader(key="cxr_image1").upload("x.png", png_bytes, "image/png").run()
+    at.toggle(key="cxr_localize").set_value(True).run()
+    at.button(key="cxr_run").click().run()
+    assert "### Detected structures" in [m.value for m in at.markdown]
+    at.toggle(key="cxr_localize").set_value(False).run()  # no re-run
+    assert not at.exception
+    assert "### Detected structures" not in [m.value for m in at.markdown]
+
+
 # --------------------------------------------------------------------------- #
 # Computed Tomography tab (DICOM -> windowing -> multi-slice)
 # --------------------------------------------------------------------------- #
@@ -837,6 +956,36 @@ def test_ct_multi_frame_shows_error_not_crash(patched_mlx):
     at.button(key="ct_run").click().run()
     assert not at.exception
     assert any("single-frame" in e.value for e in at.error)
+
+
+def test_ct_result_persists_across_rerun(patched_mlx, monkeypatch):
+    _force_ram_gib(monkeypatch, 32)
+    out = MagicMock()
+    out.text = "Two contiguous slices of the liver."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ct_prompt").set_value("Any lesions?").run()
+    _upload_ct_pair(at)
+    at.button(key="ct_run").click().run()
+    assert "Two contiguous slices of the liver." in [m.value for m in at.markdown]
+    at.toggle(key="ct_thinking").set_value(True).run()  # unrelated rerun, no click
+    assert not at.exception
+    assert "Two contiguous slices of the liver." in [m.value for m in at.markdown]
+
+
+def test_ct_stale_result_cleared_when_slice_count_changes(patched_mlx, monkeypatch):
+    _force_ram_gib(monkeypatch, 32)  # slider default 8, max 16
+    out = MagicMock()
+    out.text = "Liver findings."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ct_prompt").set_value("Any lesions?").run()
+    _upload_ct_pair(at)
+    at.button(key="ct_run").click().run()
+    assert "Liver findings." in [m.value for m in at.markdown]
+    at.slider(key="ct_slices").set_value(4).run()  # changes n_slices -> stale, no run
+    assert not at.exception
+    assert "Liver findings." not in [m.value for m in at.markdown]
 
 
 # --------------------------------------------------------------------------- #
@@ -1048,3 +1197,21 @@ def test_wsi_sparse_tissue_reduces_patch_count(patched_mlx, monkeypatch):
     assert not at.exception
     assert captured["act_kwargs"]["num_images"] == 3
     assert any("3 patches sampled" in c.value for c in at.caption)
+
+
+def test_wsi_result_persists_across_rerun(patched_mlx, patched_openslide, monkeypatch):
+    _force_ram_gib(monkeypatch, 32)
+    out = MagicMock()
+    out.text = "Moderately differentiated adenocarcinoma."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.button(key="wsi_run").click().run()
+    overview = "Moderately differentiated adenocarcinoma."
+    assert overview in [m.value for m in at.markdown]
+    at.toggle(key="wsi_thinking").set_value(True).run()  # unrelated rerun, no click
+    assert not at.exception
+    assert overview in [m.value for m in at.markdown]
+    # The tissue-overview + magnification caption persist too.
+    assert any("patches sampled at ~" in c.value for c in at.caption)

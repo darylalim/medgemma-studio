@@ -256,10 +256,14 @@ def load_ct_volume(
     CT path cannot handle: multiple series, compressed pixel data, or
     multi-frame/color (non-2D) images.
     """
-    datasets = sorted(
-        (pydicom.dcmread(f) for f in dicom_files),
-        key=lambda d: int(d.InstanceNumber),
-    )
+    # Rewind each upload before reading: Streamlit keeps the UploadedFile (a
+    # BytesIO) in session_state across reruns and dcmread reads from the current
+    # position, so a second Run on the same files would otherwise fail mid-stream.
+    datasets = []
+    for f in dicom_files:
+        f.seek(0)
+        datasets.append(pydicom.dcmread(f))
+    datasets.sort(key=lambda d: int(d.InstanceNumber))
     if len({getattr(d, "SeriesInstanceUID", None) for d in datasets}) > 1:
         raise ValueError(
             "Multiple DICOM series detected; please upload one series at a time."
@@ -309,6 +313,15 @@ def _detect_total_ram_gib() -> float:
         return 16.0
 
 
+@st.cache_data(show_spinner=False)
+def _cached_total_ram_gib() -> float:
+    """Installed RAM is fixed for the process, so memoize it: the CT/WSI sliders
+    call ``ram_aware_slice_cap`` on every rerun, and detection can shell out to
+    ``sysctl``. Kept separate from ``_detect_total_ram_gib`` so that helper stays
+    uncached and directly unit-testable."""
+    return _detect_total_ram_gib()
+
+
 def ram_aware_slice_cap(total_ram_gib: float | None = None) -> tuple[int, int]:
     """Return ``(default, max)`` CT slice counts scaled to installed memory.
 
@@ -318,7 +331,7 @@ def ram_aware_slice_cap(total_ram_gib: float | None = None) -> tuple[int, int]:
     max is clamped to a practical ceiling. On a 32 GiB machine this yields (8, 16).
     """
     if total_ram_gib is None:
-        total_ram_gib = _detect_total_ram_gib()
+        total_ram_gib = _cached_total_ram_gib()
     base_gib, per_slice_gib, headroom_gib, hard_max = 13.0, 0.5, 11.0, 64
     budget = total_ram_gib - base_gib - headroom_gib
     max_slices = max(2, min(hard_max, int(budget / per_slice_gib)))
@@ -528,6 +541,7 @@ def load_wsi_patches(
 
 
 def show_response(response: str) -> None:
+    st.divider()
     st.markdown("### Response")
     st.markdown(response)
 
@@ -549,7 +563,11 @@ def load_and_preview_image(uploaded_file, caption: str) -> Image.Image | None:
         return None
 
 
-st.set_page_config(page_title="MedGemma Studio")
+st.set_page_config(
+    page_title="MedGemma Studio",
+    page_icon=":material/clinical_notes:",
+    layout="centered",
+)
 
 
 def run_model(model, processor, config, messages, images, max_new_tokens):
@@ -622,6 +640,15 @@ def tab_settings(
     return instruction, is_thinking
 
 
+def _file_sig(uploaded) -> tuple:
+    """Identity of an uploaded file (name + size) for staleness checks; () when no
+    file. A persisted result stores the signature of the inputs that produced it,
+    so the render block drops it once the upload (or any tracked input) changes."""
+    if uploaded is None:
+        return ()
+    return (getattr(uploaded, "name", ""), getattr(uploaded, "size", 0))
+
+
 def render_ask_tab(model, processor, config):
     st.caption("Ask a medical question. No image required.")
     prompt = st.text_input(
@@ -631,17 +658,26 @@ def render_ask_tab(model, processor, config):
     ).strip()
     instruction, is_thinking = tab_settings("ask", DEFAULT_INSTRUCTION_TEXT)
 
-    if not st.button("Run", type="primary", disabled=not prompt, key="ask_run"):
-        return
+    if st.button("Run", type="primary", disabled=not prompt, key="ask_run"):
+        full_instruction, max_new_tokens = get_generation_params(
+            has_image=False, is_thinking=is_thinking, system_instruction=instruction
+        )
+        messages = build_messages(prompt, full_instruction)
+        raw = run_model(model, processor, config, messages, [], max_new_tokens)
+        # Persist the run so it survives later reruns: editing any widget reruns
+        # the script and the Run button returns False, which would otherwise wipe
+        # the answer. Inference stays inside the button block; the render below
+        # reads from session_state on every rerun. The stored ``sig`` (the prompt)
+        # lets the render drop the result once the question changes.
+        st.session_state["ask_result"] = (
+            None
+            if raw is None
+            else {"raw": raw, "is_thinking": is_thinking, "sig": prompt}
+        )
 
-    full_instruction, max_new_tokens = get_generation_params(
-        has_image=False, is_thinking=is_thinking, system_instruction=instruction
-    )
-    messages = build_messages(prompt, full_instruction)
-    raw = run_model(model, processor, config, messages, [], max_new_tokens)
-    if raw is None:
-        return
-    show_response(render_thought(raw, is_thinking))
+    result = st.session_state.get("ask_result")
+    if result is not None and result["sig"] == prompt:
+        show_response(render_thought(result["raw"], result["is_thinking"]))
 
 
 def render_cxr_tab(model, processor, config):
@@ -651,22 +687,21 @@ def render_cxr_tab(model, processor, config):
         key="cxr_prompt",
     ).strip()
 
-    image1 = load_and_preview_image(
-        st.file_uploader("Upload a chest X-ray", type=IMAGE_TYPES, key="cxr_image1"),
-        caption="Uploaded image",
+    upload1 = st.file_uploader(
+        "Upload a chest X-ray", type=IMAGE_TYPES, key="cxr_image1"
     )
+    image1 = load_and_preview_image(upload1, caption="Uploaded image")
     # A second slot appears only once the first image exists, so the model can
     # compare two studies (e.g. longitudinal CXR) in a single prompt.
+    upload2 = None
     image2 = None
     if image1 is not None:
-        image2 = load_and_preview_image(
-            st.file_uploader(
-                "Upload a second image to compare (optional)",
-                type=IMAGE_TYPES,
-                key="cxr_image2",
-            ),
-            caption="Second image",
+        upload2 = st.file_uploader(
+            "Upload a second image to compare (optional)",
+            type=IMAGE_TYPES,
+            key="cxr_image2",
         )
+        image2 = load_and_preview_image(upload2, caption="Second image")
 
     images = [img for img in (image1, image2) if img is not None]
     has_image = len(images) >= 1
@@ -687,58 +722,91 @@ def render_cxr_tab(model, processor, config):
     )
     if is_localizing and len(images) == 1:
         st.caption(
-            "ℹ️ Localization uses a built-in prompt; the System instruction above "
-            "is ignored in this mode."
+            ":material/info: Localization uses a built-in prompt; the System "
+            "instruction above is ignored in this mode."
         )
     elif is_comparing:
-        st.caption("ℹ️ Comparison mode: both images are sent to the model together.")
+        st.caption(
+            ":material/info: Comparison mode: both images are sent to the model "
+            "together."
+        )
 
-    if not st.button("Run", type="primary", disabled=not prompt, key="cxr_run"):
+    # Signature of the inputs this result depends on: a stale result is dropped
+    # (not rendered) once the prompt, either upload, or the localize mode changes.
+    cxr_sig = (prompt, is_localizing, _file_sig(upload1), _file_sig(upload2))
+
+    if st.button("Run", type="primary", disabled=not prompt, key="cxr_run"):
+        # Localization is single-image only; with two images it is unavailable.
+        localize = is_localizing and len(images) == 1
+        localize_size: tuple[int, int] | None = None
+        full_instruction, max_new_tokens = get_generation_params(
+            has_image,
+            is_thinking,
+            instruction,
+            is_localizing=localize,
+            is_comparing=is_comparing,
+        )
+
+        if localize:
+            # Pad to a square so the model's [0, 1000] coordinates map back without
+            # an offset, then crop the annotated result to the original size.
+            localize_size = images[0].size
+            model_images = [pad_to_square(images[0])]
+        else:
+            model_images = images
+
+        # Label the two studies so the comparison persona's "first/second image"
+        # wording binds to a specific image regardless of attention ordering.
+        image_labels = ["First image:", "Second image:"] if is_comparing else None
+        messages = build_messages(
+            prompt, full_instruction, model_images, image_labels=image_labels
+        )
+        raw = run_model(
+            model, processor, config, messages, model_images, max_new_tokens
+        )
+        # Persist the finished run (see render_ask_tab). For localization, parse the
+        # boxes and draw the annotation once here — strip any thinking trace with
+        # parse_response so the expander is rendered only in the block below.
+        if raw is None:
+            st.session_state["cxr_result"] = None
+        elif localize:
+            _, answer = parse_response(raw, is_thinking)
+            boxes = parse_boxes(answer)
+            annotated = None
+            if boxes and localize_size is not None:
+                width, height = localize_size
+                annotated = draw_boxes(model_images[0], boxes).crop(
+                    (0, 0, width, height)
+                )
+            st.session_state["cxr_result"] = {
+                "mode": "localize",
+                "raw": raw,
+                "is_thinking": is_thinking,
+                "annotated": annotated,
+                "boxes": boxes,
+                "sig": cxr_sig,
+            }
+        else:
+            st.session_state["cxr_result"] = {
+                "mode": "text",
+                "raw": raw,
+                "is_thinking": is_thinking,
+                "sig": cxr_sig,
+            }
+
+    result = st.session_state.get("cxr_result")
+    if result is None or result["sig"] != cxr_sig:
         return
-
-    # Localization is single-image only; with two images it is unavailable.
-    localize = is_localizing and len(images) == 1
-    localize_size: tuple[int, int] | None = None
-    full_instruction, max_new_tokens = get_generation_params(
-        has_image,
-        is_thinking,
-        instruction,
-        is_localizing=localize,
-        is_comparing=is_comparing,
-    )
-
-    if localize:
-        # Pad to a square so the model's [0, 1000] coordinates map back without an
-        # offset, then crop the annotated result to the original size.
-        localize_size = images[0].size
-        model_images = [pad_to_square(images[0])]
-    else:
-        model_images = images
-
-    # Label the two studies so the comparison persona's "first/second image" wording
-    # binds to a specific image regardless of attention ordering.
-    image_labels = ["First image:", "Second image:"] if is_comparing else None
-    messages = build_messages(
-        prompt, full_instruction, model_images, image_labels=image_labels
-    )
-    raw = run_model(model, processor, config, messages, model_images, max_new_tokens)
-    if raw is None:
-        return
-    response = render_thought(raw, is_thinking)
-
-    if localize:
-        boxes = parse_boxes(response)
-        # localize_size is always set when localize is True; the explicit check also
-        # narrows it from Optional for the type checker.
-        if boxes and localize_size is not None:
-            width, height = localize_size
-            annotated = draw_boxes(model_images[0], boxes).crop((0, 0, width, height))
-            st.image(annotated, caption="Localized anatomy", width="stretch")
+    response = render_thought(result["raw"], result["is_thinking"])
+    if result["mode"] == "localize":
+        if result["annotated"] is not None:
+            st.image(result["annotated"], caption="Localized anatomy", width="stretch")
+            st.divider()
             st.markdown("### Detected structures")
             st.markdown(
                 "\n".join(
                     f"- **{box['label'] or 'unlabeled'}**: {box['box_2d']}"
-                    for box in boxes
+                    for box in result["boxes"]
                 )
             )
         else:
@@ -781,37 +849,54 @@ def render_ct_tab(model, processor, config):
 
     instruction, is_thinking = tab_settings("ct", DEFAULT_INSTRUCTION_CT)
 
-    if not st.button(
+    # Drop a persisted result once the prompt, uploaded slices, or slice count change.
+    ct_sig = (prompt, tuple(_file_sig(f) for f in dicom_files or []), n_slices)
+
+    if st.button(
         "Run", type="primary", disabled=not (prompt and dicom_files), key="ct_run"
     ):
-        return
+        # Clear any prior run, then do all the heavy work (DICOM read, windowing,
+        # inference) strictly inside the button block; persist the result so it
+        # survives later reruns (see render_ask_tab).
+        st.session_state["ct_result"] = None
+        try:
+            hu_slices = load_ct_volume(dicom_files, n_slices)
+        except Exception as e:
+            st.error(f"Failed to read DICOM series: {e}")
+            hu_slices = None
+        if hu_slices is not None:
+            slice_images = [window_ct_slice(hu) for hu in hu_slices]
+            labels = [f"SLICE {i}" for i in range(1, len(slice_images) + 1)]
+            full_instruction, max_new_tokens = get_generation_params(
+                has_image=True,
+                is_thinking=is_thinking,
+                system_instruction=instruction,
+                is_ct=True,
+            )
+            messages = build_messages(
+                prompt, full_instruction, slice_images, image_labels=labels
+            )
+            raw = run_model(
+                model, processor, config, messages, slice_images, max_new_tokens
+            )
+            if raw is not None:
+                st.session_state["ct_result"] = {
+                    "preview": slice_images[0],
+                    "count": len(slice_images),
+                    "raw": raw,
+                    "is_thinking": is_thinking,
+                    "sig": ct_sig,
+                }
 
-    try:
-        hu_slices = load_ct_volume(dicom_files, n_slices)
-    except Exception as e:
-        st.error(f"Failed to read DICOM series: {e}")
+    result = st.session_state.get("ct_result")
+    if result is None or result["sig"] != ct_sig:
         return
-
-    slice_images = [window_ct_slice(hu) for hu in hu_slices]
     st.image(
-        slice_images[0],
-        caption=f"Sample windowed slice (1 of {len(slice_images)})",
+        result["preview"],
+        caption=f"Sample windowed slice (1 of {result['count']})",
         width="stretch",
     )
-    labels = [f"SLICE {i}" for i in range(1, len(slice_images) + 1)]
-    full_instruction, max_new_tokens = get_generation_params(
-        has_image=True,
-        is_thinking=is_thinking,
-        system_instruction=instruction,
-        is_ct=True,
-    )
-    messages = build_messages(
-        prompt, full_instruction, slice_images, image_labels=labels
-    )
-    raw = run_model(model, processor, config, messages, slice_images, max_new_tokens)
-    if raw is None:
-        return
-    show_response(render_thought(raw, is_thinking))
+    show_response(render_thought(result["raw"], result["is_thinking"]))
 
 
 def render_wsi_tab(model, processor, config):
@@ -851,38 +936,58 @@ def render_wsi_tab(model, processor, config):
 
     instruction, is_thinking = tab_settings("wsi", DEFAULT_INSTRUCTION_WSI)
 
-    if not st.button(
+    # Drop a persisted result once the prompt, slide, magnification, or patch count
+    # change.
+    wsi_sig = (prompt, _file_sig(slide_file), target_mag, n_patches)
+
+    if st.button(
         "Run", type="primary", disabled=not (prompt and slide_file), key="wsi_run"
     ):
-        return
+        # Clear any prior run, then do all the heavy work (OpenSlide read, tiling,
+        # inference) strictly inside the button block; persist the result so it
+        # survives later reruns (see render_ask_tab).
+        st.session_state["wsi_result"] = None
+        try:
+            patches, overlay, actual_mag = load_wsi_patches(
+                slide_file, target_mag, n_patches
+            )
+        except Exception as e:
+            st.error(f"Failed to read slide: {e}")
+            patches = None
+        if patches is not None:
+            labels = [f"PATCH {i}" for i in range(1, len(patches) + 1)]
+            full_instruction, max_new_tokens = get_generation_params(
+                has_image=True,
+                is_thinking=is_thinking,
+                system_instruction=instruction,
+                is_wsi=True,
+            )
+            messages = build_messages(
+                prompt, full_instruction, patches, image_labels=labels
+            )
+            raw = run_model(model, processor, config, messages, patches, max_new_tokens)
+            if raw is not None:
+                st.session_state["wsi_result"] = {
+                    "overlay": overlay,
+                    "actual_mag": actual_mag,
+                    "count": len(patches),
+                    "preview": patches[0],
+                    "raw": raw,
+                    "is_thinking": is_thinking,
+                    "sig": wsi_sig,
+                }
 
-    try:
-        patches, overlay, actual_mag = load_wsi_patches(
-            slide_file, target_mag, n_patches
-        )
-    except Exception as e:
-        st.error(f"Failed to read slide: {e}")
+    result = st.session_state.get("wsi_result")
+    if result is None or result["sig"] != wsi_sig:
         return
-
-    st.image(overlay, caption="Tissue overview", width="stretch")
-    st.caption(f"{len(patches)} patches sampled at ~{actual_mag:.1f}x.")
+    st.image(result["overlay"], caption="Tissue overview", width="stretch")
+    st.caption(f"{result['count']} patches sampled at ~{result['actual_mag']:.1f}x.")
     st.image(
-        patches[0],
-        caption=f"Sample patch (1 of {len(patches)})",
+        result["preview"],
+        caption=f"Sample patch (1 of {result['count']})",
         width="stretch",
     )
-    labels = [f"PATCH {i}" for i in range(1, len(patches) + 1)]
-    full_instruction, max_new_tokens = get_generation_params(
-        has_image=True,
-        is_thinking=is_thinking,
-        system_instruction=instruction,
-        is_wsi=True,
-    )
-    messages = build_messages(prompt, full_instruction, patches, image_labels=labels)
-    raw = run_model(model, processor, config, messages, patches, max_new_tokens)
-    if raw is None:
-        return
-    show_response(render_thought(raw, is_thinking))
+    show_response(render_thought(result["raw"], result["is_thinking"]))
 
 
 def main():
@@ -890,7 +995,12 @@ def main():
     with st.spinner("Loading model..."):
         model, processor, config = load_model()
     tab_ask, tab_cxr, tab_ct, tab_wsi = st.tabs(
-        ["Ask", "Chest X-ray", "Computed Tomography", "Pathology (WSI)"]
+        [
+            ":material/forum: Ask",
+            ":material/radiology: Chest X-ray",
+            ":material/readiness_score: Computed Tomography",
+            ":material/biotech: Pathology (WSI)",
+        ]
     )
     with tab_ask:
         render_ask_tab(model, processor, config)
