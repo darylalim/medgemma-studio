@@ -5,7 +5,7 @@ description = "Analyze medical text, 2D images, 3D CT volumes, and whole-slide p
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
-    "mlx-vlm>=0.6.3",
+    "mlx-vlm>=0.6.3,<0.7",
     "numpy>=2.4.6",
     "openslide-bin>=4.0.1.2",
     "openslide-python>=1.4.6",

@@ -574,7 +574,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mlx-vlm", specifier = ">=0.6.3" },
+    { name = "mlx-vlm", specifier = ">=0.6.3,<0.7" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "openslide-bin", specifier = ">=4.0.1.2" },
     { name = "openslide-python", specifier = ">=1.4.6" },

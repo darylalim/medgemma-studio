@@ -3,6 +3,7 @@ import inspect
 import io
 import os
 import subprocess
+import typing
 from types import SimpleNamespace
 
 import numpy as np
@@ -872,32 +873,51 @@ class TestMlxVlmContract:
         assert callable(apply_chat_template)
         assert callable(load_config)
 
+    def test_load_returns_model_processor_pair(self):
+        # load_model() unpacks `model, processor = load(MODEL_ID)` — a fixed 2-tuple.
+        # Guard the arity via load()'s return annotation (no model load).
+        from mlx_vlm import load
+
+        ann = inspect.signature(load).return_annotation
+        assert ann is not inspect.Signature.empty, "load() lost its return annotation"
+        assert not isinstance(ann, str), (
+            f"load() return annotation is stringized ({ann!r})"
+        )
+        assert typing.get_origin(ann) is tuple, (
+            f"load() no longer returns a tuple ({ann!r})"
+        )
+        assert len(typing.get_args(ann)) == 2, (
+            f"load() return arity changed; run_model unpacks exactly 2 ({ann!r})"
+        )
+
     def test_generate_accepts_run_model_kwargs(self):
-        # run_model() passes these to generate(); explicit params or via **kwargs.
+        # run_model() passes verbose + max_tokens/temperature/repetition_penalty/
+        # repetition_context_size to generate(). Only `verbose` is an explicit param
+        # today; the others ride **kwargs, so assert exactly that shape. Whether the
+        # swallowed kwargs are honored is checked by the docstring test below.
         from mlx_vlm import generate
 
         params = inspect.signature(generate).parameters
-        accepts_var_kw = any(
-            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        assert "verbose" in params, "generate() dropped the explicit 'verbose' param"
+        assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()), (
+            "generate() dropped **kwargs that the sampling kwargs ride on"
         )
+
+    def test_generate_documents_sampling_kwargs(self):
+        # The sampling kwargs run_model() rides on generate()'s **kwargs (max_tokens,
+        # temperature, and the f43be85 repetition-loop fix). A signature check can't
+        # prove a swallowed kwarg is honored vs silently ignored, so their presence in
+        # the public docstring is the lightweight guard that they remain supported.
+        from mlx_vlm import generate
+
+        doc = (generate.__doc__ or "").lower()
         for kw in (
             "max_tokens",
             "temperature",
             "repetition_penalty",
             "repetition_context_size",
-            "verbose",
         ):
-            assert kw in params or accepts_var_kw, f"generate() dropped {kw!r}"
-
-    def test_generate_still_documents_repetition_penalty(self):
-        # repetition_penalty is the f43be85 greedy-loop fix. generate() takes **kwargs,
-        # so a signature check can't prove it is still honored vs silently swallowed;
-        # its presence in the public docstring is the lightweight guard.
-        from mlx_vlm import generate
-
-        doc = (generate.__doc__ or "").lower()
-        assert "repetition_penalty" in doc
-        assert "repetition_context_size" in doc
+            assert kw in doc, f"generate() docstring no longer mentions {kw!r}"
 
     def test_generation_result_exposes_text(self):
         # run_model() returns output.text. Reach the return type through generate()'s
