@@ -1,3 +1,5 @@
+import dataclasses
+import inspect
 import io
 import os
 import subprocess
@@ -846,3 +848,82 @@ class TestSlideObjectivePower:
 
     def test_no_properties_defaults_to_40(self):
         assert _slide_objective_power(self._slide({})) == 40.0
+
+
+class TestMlxVlmContract:
+    """Guard the mlx-vlm API surface the app depends on.
+
+    Every other test mocks ``mlx_vlm.*`` (AppTest re-execs the script, and a real
+    model load is far too heavy for a unit test), so those mocks pass no matter what
+    the installed mlx-vlm actually exposes. These introspection checks are the only
+    ones that fail when an upgrade drops or renames something ``run_model`` /
+    ``load_model`` relies on — caught here instead of at inference time. Imports stay
+    inside each test so a moved path fails only that check, not the whole suite.
+    """
+
+    def test_public_import_surface_is_callable(self):
+        # The exact import paths streamlit_app uses (see its module header).
+        from mlx_vlm import generate, load
+        from mlx_vlm.prompt_utils import apply_chat_template
+        from mlx_vlm.utils import load_config
+
+        assert callable(generate)
+        assert callable(load)
+        assert callable(apply_chat_template)
+        assert callable(load_config)
+
+    def test_generate_accepts_run_model_kwargs(self):
+        # run_model() passes these to generate(); explicit params or via **kwargs.
+        from mlx_vlm import generate
+
+        params = inspect.signature(generate).parameters
+        accepts_var_kw = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        for kw in (
+            "max_tokens",
+            "temperature",
+            "repetition_penalty",
+            "repetition_context_size",
+            "verbose",
+        ):
+            assert kw in params or accepts_var_kw, f"generate() dropped {kw!r}"
+
+    def test_generate_still_documents_repetition_penalty(self):
+        # repetition_penalty is the f43be85 greedy-loop fix. generate() takes **kwargs,
+        # so a signature check can't prove it is still honored vs silently swallowed;
+        # its presence in the public docstring is the lightweight guard.
+        from mlx_vlm import generate
+
+        doc = (generate.__doc__ or "").lower()
+        assert "repetition_penalty" in doc
+        assert "repetition_context_size" in doc
+
+    def test_generation_result_exposes_text(self):
+        # run_model() returns output.text. Reach the return type through generate()'s
+        # own annotation rather than importing an internal submodule, so the check
+        # stays decoupled from mlx_vlm's package layout.
+        from mlx_vlm import generate
+
+        result_type = inspect.signature(generate).return_annotation
+        assert result_type is not inspect.Signature.empty, (
+            "generate() lost its return annotation"
+        )
+        assert not isinstance(result_type, str), (
+            f"generate() return annotation is stringized ({result_type!r})"
+        )
+        if dataclasses.is_dataclass(result_type):
+            fields = {f.name for f in dataclasses.fields(result_type)}
+        else:
+            fields = set(dir(result_type))
+        assert "text" in fields
+
+    def test_apply_chat_template_accepts_num_images(self):
+        # run_model() calls apply_chat_template(..., num_images=).
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        params = inspect.signature(apply_chat_template).parameters
+        accepts_var_kw = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        assert "num_images" in params or accepts_var_kw
