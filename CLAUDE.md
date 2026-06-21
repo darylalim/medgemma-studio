@@ -15,6 +15,8 @@ uv run ty check                   # Type check
 uv run pytest                     # Run tests
 ```
 
+When working with Python, invoke the relevant `/astral:<skill>` (`/astral:uv`, `/astral:ty`, `/astral:ruff`) to ensure best practices are followed.
+
 ## Architecture
 
 Single-file app (`streamlit_app.py`) with the following structure:
