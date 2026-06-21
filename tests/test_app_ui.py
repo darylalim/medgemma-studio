@@ -132,7 +132,7 @@ def _upload_slide(at, data=b"slide"):
 
 def test_title_renders(app):
     assert not app.exception
-    assert app.title[0].value == "MedGemma Pipeline"
+    assert app.title[0].value == "MedGemma Studio"
 
 
 def test_four_tabs_render(app):

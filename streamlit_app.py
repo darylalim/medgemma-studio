@@ -547,7 +547,7 @@ def load_and_preview_image(uploaded_file, caption: str) -> Image.Image | None:
         return None
 
 
-st.set_page_config(page_title="MedGemma Pipeline")
+st.set_page_config(page_title="MedGemma Studio")
 
 
 def run_model(model, processor, config, messages, images, max_new_tokens):
@@ -884,7 +884,7 @@ def render_wsi_tab(model, processor, config):
 
 
 def main():
-    st.title("MedGemma Pipeline")
+    st.title("MedGemma Studio")
     with st.spinner("Loading model..."):
         model, processor, config = load_model()
     tab_ask, tab_cxr, tab_ct, tab_wsi = st.tabs(

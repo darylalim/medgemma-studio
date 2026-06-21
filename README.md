@@ -1,4 +1,4 @@
-# MedGemma Pipeline
+# MedGemma Studio
 
 Analyze medical text, 2D images (e.g. chest X-ray), 3D CT volumes, and whole-slide pathology images with the Google [MedGemma 1.5](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) model on Apple Silicon with MLX.
 

@@ -1,5 +1,5 @@
 [project]
-name = "medgemma-pipeline"
+name = "medgemma-studio"
 version = "0.5.0"
 description = "Analyze medical text, 2D images, 3D CT volumes, and whole-slide pathology images with the Google MedGemma 1.5 model on Apple Silicon with MLX."
 readme = "README.md"
