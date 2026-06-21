@@ -53,3 +53,5 @@ uv run ruff format .              # Format
 uv run ty check                   # Type check
 uv run pytest                     # Run tests
 ```
+
+Linting uses a curated ruff rule set (`E`, `F`, `I`, `UP`, `B`, `SIM`, `C4`); see `[tool.ruff.lint]` in `pyproject.toml`.

@@ -61,3 +61,4 @@ Single-file app (`streamlit_app.py`) with the following structure:
 - **OpenSlide** — `openslide-python` + `openslide-bin` (the native C lib ships as a pure arm64/universal2 wheel, so no Homebrew is needed). Only single-file WSI formats are accepted; `.mrxs` (multi-file) is excluded
 - **HF token** — optional; loaded from `.env` via `python-dotenv`. The MLX model repo is ungated, so a token only helps avoid download rate limits
 - **Streamlit API** — use `width="stretch"` (not deprecated `use_container_width`)
+- **Linting** — ruff with a curated rule set (`E`, `F`, `I`, `UP`, `B`, `SIM`, `C4`); see `[tool.ruff.lint]`
