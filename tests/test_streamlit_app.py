@@ -3,7 +3,9 @@ import inspect
 import io
 import os
 import subprocess
+import tomllib
 import typing
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -958,3 +960,58 @@ class TestMlxVlmContract:
             p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
         )
         assert "num_images" in params or accepts_var_kw
+
+
+class TestThemeConfig:
+    """Guard the .streamlit/config.toml clinical theme. Like TestMlxVlmContract, this
+    checks a real asset (not a mock): the file must parse, define BOTH [theme.light]
+    and [theme.dark] (Streamlit only offers the light/dark auto-switch when both
+    exist), and use only theme keys the installed Streamlit recognizes."""
+
+    CONFIG = Path(__file__).resolve().parent.parent / ".streamlit" / "config.toml"
+
+    def _theme(self) -> dict:
+        with open(self.CONFIG, "rb") as f:
+            return tomllib.load(f)["theme"]
+
+    def test_config_exists_and_parses(self):
+        assert self.CONFIG.is_file()
+        assert isinstance(self._theme(), dict)  # raises if not valid TOML / no [theme]
+
+    def test_defines_both_light_and_dark_modes(self):
+        # Both subsections are required for the OS/browser auto-switch; dropping
+        # either silently locks the app to a single mode.
+        theme = self._theme()
+        assert "light" in theme and "dark" in theme
+
+    def test_both_modes_define_the_core_palette(self):
+        theme = self._theme()
+        core = {
+            "primaryColor",
+            "backgroundColor",
+            "secondaryBackgroundColor",
+            "textColor",
+        }
+        for mode in ("light", "dark"):
+            assert core <= set(theme[mode]), f"[theme.{mode}] is missing core colors"
+
+    def test_only_uses_recognized_theme_keys(self):
+        # Cross-check every key against the theme options the installed Streamlit
+        # registers, so a typo'd or removed key fails here instead of degrading to a
+        # silent startup warning (mirrors the mlx-vlm contract guard's intent).
+        from streamlit import config as st_config
+
+        valid = {
+            name.split(".", 1)[1]
+            for name in st_config.get_config_options()
+            if name.startswith("theme.")
+        }
+        theme = self._theme()
+        shared = {k for k, v in theme.items() if not isinstance(v, dict)}
+        for keys, where in (
+            (shared, "[theme]"),
+            (set(theme["light"]), "[theme.light]"),
+            (set(theme["dark"]), "[theme.dark]"),
+        ):
+            unknown = keys - valid
+            assert not unknown, f"unrecognized theme keys in {where}: {unknown}"
