@@ -10,6 +10,8 @@ Analyze medical text, 2D images (e.g. chest X-ray), 3D CT volumes, and whole-sli
   - **Computed Tomography** — upload a DICOM series; each slice is windowed into MedGemma's trained false-color (Hounsfield-unit) representation and read as a stack
   - **Pathology (WSI)** — upload a whole-slide image (`.svs`/`.ndpi`/`.tiff`); tissue patches are sampled at a chosen magnification and read as the 896px tiles MedGemma is trained on
 - RAM-aware cap on CT slices / WSI patches (multi-image inference is memory-heavy on unified memory)
+- Results stay visible across reruns and clear automatically when you change the inputs
+- Clinical light/dark theme that follows your system (OS/browser) appearance
 - Fully local inference on Apple Silicon via MLX
 
 ## Setup
