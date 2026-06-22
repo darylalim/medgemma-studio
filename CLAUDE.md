@@ -62,5 +62,5 @@ Single-file app (`streamlit_app.py`) with the following structure:
 - **OpenSlide** — `openslide-python` + `openslide-bin` (the native C lib ships as a pure arm64/universal2 wheel, so no Homebrew is needed). Only single-file WSI formats are accepted; `.mrxs` (multi-file) is excluded
 - **HF token** — optional; loaded from `.env` via `python-dotenv`. The MLX model repo is ungated, so a token only helps avoid download rate limits
 - **Streamlit API** — use `width="stretch"` (not deprecated `use_container_width`)
-- **Theme** — a clinical light theme lives in `.streamlit/config.toml` (`[theme]` only — no `[theme.dark]`, so the app stays single-mode); all keys are validated against the installed Streamlit version
+- **Theme** — a clinical theme lives in `.streamlit/config.toml`: shared structural settings in `[theme]` plus `[theme.light]`/`[theme.dark]` palettes, so the app follows the user's OS/browser mode (defining both subsections is what enables the switch; a lone `[theme]` would lock to one mode). The light side is the calm clinical default; the dark side mirrors it for reading-room use. All keys are validated against the installed Streamlit version
 - **Linting** — ruff with a curated rule set (`E`, `F`, `I`, `UP`, `B`, `SIM`, `C4`); see `[tool.ruff.lint]`

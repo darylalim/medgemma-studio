@@ -1,21 +1,36 @@
-# Clinical light theme: a calm, single restrained blue accent on a clean white
-# canvas. Light base is appropriate for a diagnostic-imaging tool — medical
-# images (CXR, windowed CT, WSI patches) are reviewed against neutral light
-# backgrounds, and a light UI keeps the surrounding chrome from tinting them.
-# Only [theme] is defined (no [theme.dark]), so the app stays in one locked mode.
+# Clinical theme. Defining BOTH [theme.light] and [theme.dark] makes the app
+# follow the user's OS/browser preference and exposes the light/dark switch in the
+# settings menu (a lone [theme] would lock the app to a single mode). Shared,
+# mode-agnostic settings live in [theme]; each mode then sets its own palette.
+# The light side stays the calm clinical default (medical images are conventionally
+# reviewed on a neutral light surround); the dark side mirrors it for reading-room
+# use. All keys are validated against the installed Streamlit version.
 [theme]
-base = "light"
+baseRadius = "8px"
+linkUnderline = false
+
+[theme.light]
 primaryColor = "#0b6bcb"              # restrained clinical blue; dark enough for white button text
 backgroundColor = "#ffffff"           # main canvas (lightest layer)
 secondaryBackgroundColor = "#f4f7fb"  # widget / code / expander backgrounds (slightly darker)
 textColor = "#1f2933"                 # near-black body text, WCAG AA on white
 linkColor = "#0b6bcb"
 borderColor = "#d7dee8"
-baseRadius = "8px"
-linkUnderline = false
-
 # Semantic palette for status callouts (st.error / st.warning / status badges)
 redColor = "#c0392b"
 orangeColor = "#b7791f"
 greenColor = "#1a7f5a"
 blueColor = "#0b6bcb"
+
+[theme.dark]
+primaryColor = "#4d9fff"              # brighter blue for contrast on a dark canvas
+backgroundColor = "#0e1117"           # main canvas (darkest layer)
+secondaryBackgroundColor = "#1b2230"  # widget / code / expander backgrounds (slightly lighter)
+textColor = "#e6edf3"                 # near-white body text, WCAG AA on dark
+linkColor = "#4d9fff"
+borderColor = "#2a3340"
+# Semantic palette lightened so callouts stay legible on the dark canvas
+redColor = "#ff6b5e"
+orangeColor = "#e0a13a"
+greenColor = "#3ecf8e"
+blueColor = "#4d9fff"
