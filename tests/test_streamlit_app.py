@@ -998,20 +998,23 @@ class TestThemeConfig:
     def test_only_uses_recognized_theme_keys(self):
         # Cross-check every key against the theme options the installed Streamlit
         # registers, so a typo'd or removed key fails here instead of degrading to a
-        # silent startup warning (mirrors the mlx-vlm contract guard's intent).
+        # silent startup warning (mirrors the mlx-vlm contract guard's intent). Each
+        # leaf is checked at its FULL scoped path (e.g. "theme.light.primaryColor"),
+        # so a top-level-only key misplaced in [theme.light] is caught, and a valid
+        # nested table like [theme.light.sidebar] is recursed into rather than
+        # misread as an unknown leaf.
         from streamlit import config as st_config
 
-        valid = {
-            name.split(".", 1)[1]
-            for name in st_config.get_config_options()
-            if name.startswith("theme.")
-        }
-        theme = self._theme()
-        shared = {k for k, v in theme.items() if not isinstance(v, dict)}
-        for keys, where in (
-            (shared, "[theme]"),
-            (set(theme["light"]), "[theme.light]"),
-            (set(theme["dark"]), "[theme.dark]"),
-        ):
-            unknown = keys - valid
-            assert not unknown, f"unrecognized theme keys in {where}: {unknown}"
+        opts = set(st_config.get_config_options())
+        unknown: list[str] = []
+
+        def walk(section: dict, prefix: str) -> None:
+            for key, value in section.items():
+                path = f"{prefix}.{key}"
+                if isinstance(value, dict):  # nested table, e.g. [theme.light.sidebar]
+                    walk(value, path)
+                elif path not in opts:
+                    unknown.append(path)
+
+        walk(self._theme(), "theme")
+        assert not unknown, f"unrecognized theme keys: {unknown}"

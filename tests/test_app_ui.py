@@ -718,15 +718,23 @@ def test_cxr_comparison_labels_images_in_prompt(patched_mlx, monkeypatch, png_by
     assert "Second image:" in user_texts
 
 
-def test_cxr_result_persists_across_rerun(patched_mlx, png_bytes):
+def test_cxr_result_persists_across_rerun(patched_mlx, monkeypatch, png_bytes):
+    calls = []
+    out = MagicMock()
+    out.text = "No acute findings."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: calls.append(1) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="cxr_prompt").set_value("Describe this X-ray").run()
     at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
     at.button(key="cxr_run").click().run()
     assert "No acute findings." in [m.value for m in at.markdown]
-    at.toggle(key="cxr_thinking").set_value(True).run()  # unrelated rerun, no click
+    assert len(calls) == 1
+    at.toggle(key="cxr_thinking").set_value(
+        True
+    ).run()  # sig-preserving rerun, no click
     assert not at.exception
     assert "No acute findings." in [m.value for m in at.markdown]
+    assert len(calls) == 1  # served from session_state, not recomputed
 
 
 def test_cxr_localization_persists_across_rerun(patched_mlx, png_bytes):
@@ -960,17 +968,20 @@ def test_ct_multi_frame_shows_error_not_crash(patched_mlx):
 
 def test_ct_result_persists_across_rerun(patched_mlx, monkeypatch):
     _force_ram_gib(monkeypatch, 32)
+    calls = []
     out = MagicMock()
     out.text = "Two contiguous slices of the liver."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: calls.append(1) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="ct_prompt").set_value("Any lesions?").run()
     _upload_ct_pair(at)
     at.button(key="ct_run").click().run()
     assert "Two contiguous slices of the liver." in [m.value for m in at.markdown]
-    at.toggle(key="ct_thinking").set_value(True).run()  # unrelated rerun, no click
+    assert len(calls) == 1
+    at.toggle(key="ct_thinking").set_value(True).run()  # sig-preserving rerun, no click
     assert not at.exception
     assert "Two contiguous slices of the liver." in [m.value for m in at.markdown]
+    assert len(calls) == 1  # served from session_state, not recomputed
 
 
 def test_ct_stale_result_cleared_when_slice_count_changes(patched_mlx, monkeypatch):
@@ -1201,17 +1212,61 @@ def test_wsi_sparse_tissue_reduces_patch_count(patched_mlx, monkeypatch):
 
 def test_wsi_result_persists_across_rerun(patched_mlx, patched_openslide, monkeypatch):
     _force_ram_gib(monkeypatch, 32)
+    calls = []
     out = MagicMock()
     out.text = "Moderately differentiated adenocarcinoma."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: calls.append(1) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
     _upload_slide(at)
     at.button(key="wsi_run").click().run()
     overview = "Moderately differentiated adenocarcinoma."
     assert overview in [m.value for m in at.markdown]
-    at.toggle(key="wsi_thinking").set_value(True).run()  # unrelated rerun, no click
+    assert len(calls) == 1
+    at.toggle(key="wsi_thinking").set_value(
+        True
+    ).run()  # sig-preserving rerun, no click
     assert not at.exception
     assert overview in [m.value for m in at.markdown]
     # The tissue-overview + magnification caption persist too.
     assert any("patches sampled at ~" in c.value for c in at.caption)
+    assert len(calls) == 1  # served from session_state, not recomputed
+
+
+def test_wsi_stale_result_cleared_when_magnification_changes(
+    patched_mlx, patched_openslide, monkeypatch
+):
+    # wsi_sig includes target_mag, so changing the magnification slider without a
+    # re-run drops the now-stale result (guards the mag branch of the sig).
+    _force_ram_gib(monkeypatch, 32)
+    out = MagicMock()
+    out.text = "Adenocarcinoma."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.button(key="wsi_run").click().run()
+    assert "Adenocarcinoma." in [m.value for m in at.markdown]
+    at.select_slider(key="wsi_mag").set_value(40).run()  # default 10 -> 40, no re-run
+    assert not at.exception
+    assert "Adenocarcinoma." not in [m.value for m in at.markdown]
+    assert not any("patches sampled at ~" in c.value for c in at.caption)
+
+
+def test_wsi_stale_result_cleared_when_patch_count_changes(
+    patched_mlx, patched_openslide, monkeypatch
+):
+    # wsi_sig includes n_patches, so moving the patch-count slider without a re-run
+    # drops the now-stale result (guards the patch-count branch of the sig).
+    _force_ram_gib(monkeypatch, 32)
+    out = MagicMock()
+    out.text = "Adenocarcinoma."
+    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.button(key="wsi_run").click().run()
+    assert "Adenocarcinoma." in [m.value for m in at.markdown]
+    at.slider(key="wsi_patches").set_value(4).run()  # default 8 -> 4, no re-run
+    assert not at.exception
+    assert "Adenocarcinoma." not in [m.value for m in at.markdown]
