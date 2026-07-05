@@ -689,6 +689,7 @@ def fresh_result_or_hint(key: str, live_sig) -> dict | None:
     return result
 
 
+@st.fragment
 def render_ask_tab(model, processor, config):
     st.caption("Ask a medical question. No image required.")
     prompt = st.text_input(
@@ -722,6 +723,7 @@ def render_ask_tab(model, processor, config):
         show_response(render_thought(result["raw"], result["is_thinking"]))
 
 
+@st.fragment
 def render_cxr_tab(model, processor, config):
     st.caption(
         "Analyze a chest X-ray. Add a second image to compare two studies, or turn "
@@ -876,6 +878,7 @@ def render_cxr_tab(model, processor, config):
         show_response(response)
 
 
+@st.fragment
 def render_ct_tab(model, processor, config):
     st.caption(
         "Upload a CT series as individual DICOM slice files. Each slice is windowed "
@@ -984,6 +987,7 @@ def render_ct_tab(model, processor, config):
     show_response(render_thought(result["raw"], result["is_thinking"]))
 
 
+@st.fragment
 def render_wsi_tab(model, processor, config):
     st.caption(
         "Upload a whole-slide image (.svs/.ndpi/.tiff). Tissue patches are sampled at "
