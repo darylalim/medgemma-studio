@@ -1,6 +1,6 @@
 [project]
 name = "medgemma-studio"
-version = "0.6.0"
+version = "0.7.0"
 description = "Streamlit application for analyzing medical text and images using Google MedGemma on Apple Silicon with MLX."
 readme = "README.md"
 requires-python = "==3.12.*"
