@@ -200,6 +200,12 @@ def test_each_tab_has_independent_settings(app):
     assert [w.key for w in app.button] == ["ask_run", "cxr_run", "ct_run", "wsi_run"]
 
 
+def test_model_settings_live_in_a_collapsed_expander_per_tab(app):
+    # The persona + thinking toggle are tucked into a "Model settings" expander so the
+    # primary prompt -> upload -> Run flow leads each tab; one such expander per tab.
+    assert len([e for e in app.expander if e.label == "Model settings"]) == 4
+
+
 def test_thinking_toggles_are_independent(app):
     app.toggle(key="ask_thinking").set_value(True).run()
     assert app.toggle(key="ask_thinking").value is True
@@ -429,6 +435,16 @@ def test_cxr_comparison_caption_disclosed(app, png_bytes):
     assert any("Comparison mode" in c.value for c in app.caption)
 
 
+def test_cxr_comparison_previews_studies_side_by_side(app, png_bytes):
+    # A single image previews full-width (no columns); a second image switches to a
+    # side-by-side st.columns(2) layout so a longitudinal pair reads at a glance.
+    app.file_uploader(key="cxr_image1").upload("a.png", png_bytes, "image/png").run()
+    assert not app.columns
+    app.file_uploader(key="cxr_image2").upload("b.png", png_bytes, "image/png").run()
+    assert not app.exception
+    assert app.columns  # two studies laid out in columns
+
+
 def test_cxr_edit_then_upload_preserves_instruction(app, png_bytes):
     app.text_area(key="cxr_instruction").set_value("MY CUSTOM INSTRUCTION").run()
     app.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
@@ -482,6 +498,9 @@ def test_cxr_localization_lists_detected_structures(patched_mlx, png_bytes):
     markdowns = [m.value for m in at.markdown]
     assert "### Detected structures" in markdowns
     assert any("right clavicle" in m for m in markdowns)
+    # The label is listed plainly; the raw normalized coords are no longer shown
+    # (the boxes are drawn on the image above, so coords would just be cryptic).
+    assert not any("[100, 100, 500, 500]" in m for m in markdowns)
     assert "### Response" not in markdowns  # localization replaces the text view
 
 
@@ -796,6 +815,7 @@ def test_cxr_stale_text_result_cleared_when_second_image_added(patched_mlx, png_
     assert not at.exception
     assert "No acute findings." not in [m.value for m in at.markdown]
     assert "### Response" not in [m.value for m in at.markdown]
+    assert any("Inputs changed" in i.value for i in at.info)  # dropped with a hint
 
 
 def test_cxr_stale_localization_cleared_when_localize_toggled_off(
@@ -1030,6 +1050,7 @@ def test_ct_stale_result_cleared_when_slice_count_changes(patched_mlx, monkeypat
     at.slider(key="ct_slices").set_value(4).run()  # changes n_slices -> stale, no run
     assert not at.exception
     assert "Liver findings." not in [m.value for m in at.markdown]
+    assert any("Inputs changed" in i.value for i in at.info)  # dropped with a hint
 
 
 # --------------------------------------------------------------------------- #
@@ -1309,3 +1330,4 @@ def test_wsi_stale_result_cleared_when_patch_count_changes(
     at.slider(key="wsi_patches").set_value(4).run()  # default 8 -> 4, no re-run
     assert not at.exception
     assert "Adenocarcinoma." not in [m.value for m in at.markdown]
+    assert any("Inputs changed" in i.value for i in at.info)  # dropped with a hint
