@@ -669,6 +669,26 @@ def _file_sig(uploaded) -> tuple:
     return (getattr(uploaded, "name", ""), getattr(uploaded, "size", 0))
 
 
+STALE_RESULT_HINT = "Inputs changed since this result — click Run to refresh."
+
+
+def fresh_result_or_hint(key: str, live_sig) -> dict | None:
+    """Single source of truth for the staleness gate shared by every tab.
+
+    Returns the persisted result stored under ``key`` when its recorded ``sig`` still
+    matches the live inputs. When a result exists but is stale, show a hint and return
+    None — an abrupt vanish (the old behavior) reads as a bug in a clinical tool.
+    Returns None with no hint when there is no stored result at all.
+    """
+    result = st.session_state.get(key)
+    if result is None:
+        return None
+    if result["sig"] != live_sig:
+        st.info(STALE_RESULT_HINT, icon=":material/refresh:")
+        return None
+    return result
+
+
 def render_ask_tab(model, processor, config):
     st.caption("Ask a medical question. No image required.")
     prompt = st.text_input(
@@ -697,8 +717,8 @@ def render_ask_tab(model, processor, config):
             else {"raw": raw, "is_thinking": is_thinking, "sig": prompt}
         )
 
-    result = st.session_state.get("ask_result")
-    if result is not None and result["sig"] == prompt:
+    result = fresh_result_or_hint("ask_result", prompt)
+    if result is not None:
         show_response(render_thought(result["raw"], result["is_thinking"]))
 
 
@@ -833,8 +853,8 @@ def render_cxr_tab(model, processor, config):
                 "sig": cxr_sig,
             }
 
-    result = st.session_state.get("cxr_result")
-    if result is None or result["sig"] != cxr_sig:
+    result = fresh_result_or_hint("cxr_result", cxr_sig)
+    if result is None:
         return
     response = render_thought(result["raw"], result["is_thinking"])
     if result["mode"] == "localize":
@@ -953,8 +973,8 @@ def render_ct_tab(model, processor, config):
                     }
                     status.update(label="Analysis complete", state="complete")
 
-    result = st.session_state.get("ct_result")
-    if result is None or result["sig"] != ct_sig:
+    result = fresh_result_or_hint("ct_result", ct_sig)
+    if result is None:
         return
     st.image(
         result["preview"],
@@ -1075,8 +1095,8 @@ def render_wsi_tab(model, processor, config):
                     }
                     status.update(label="Analysis complete", state="complete")
 
-    result = st.session_state.get("wsi_result")
-    if result is None or result["sig"] != wsi_sig:
+    result = fresh_result_or_hint("wsi_result", wsi_sig)
+    if result is None:
         return
     st.image(result["overlay"], caption="Tissue overview", width="stretch")
     st.caption(f"{result['count']} patches sampled at ~{result['actual_mag']:.1f}x.")

@@ -339,6 +339,8 @@ def test_ask_stale_result_cleared_when_prompt_changes(patched_mlx):
     assert not at.exception
     assert "No acute findings." not in [m.value for m in at.markdown]
     assert "### Response" not in [m.value for m in at.markdown]
+    # The stale result is dropped with a visible hint, not a silent vanish.
+    assert any("Inputs changed" in i.value for i in at.info)
 
 
 # --------------------------------------------------------------------------- #
