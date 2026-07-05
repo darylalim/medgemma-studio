@@ -2,7 +2,7 @@
 
 ## Project
 
-**medgemma-studio** — Analyze medical text, 2D images (e.g. chest X-ray), 3D CT volumes, and whole-slide pathology images with the Google MedGemma 1.5 model on Apple Silicon with MLX.
+**medgemma-studio** — Streamlit application for analyzing medical text and images using Google MedGemma on Apple Silicon with MLX.
 
 ## Commands
 
