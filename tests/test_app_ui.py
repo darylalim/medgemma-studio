@@ -844,6 +844,8 @@ def test_ct_inference_passes_windowed_slices(patched_mlx, monkeypatch):
     assert captured["gen_kwargs"]["repetition_penalty"] == REPETITION_PENALTY
     assert captured["gen_kwargs"]["repetition_context_size"] == REPETITION_CONTEXT_SIZE
     assert "Two contiguous slices of the liver." in [m.value for m in at.markdown]
+    # The staged st.status wraps the whole CT pipeline and resolves to complete.
+    assert at.status[0].state == "complete"
 
 
 def test_ct_labels_slices_in_prompt(patched_mlx, monkeypatch):
@@ -898,6 +900,9 @@ def test_ct_invalid_dicom_shows_error(patched_mlx):
     assert not at.exception
     assert any("Failed to read DICOM series" in e.value for e in at.error)
     assert "### Response" not in [m.value for m in at.markdown]
+    # A read failure drives the st.status into its error state (and expands it so
+    # the nested error is visible rather than hidden behind a collapsed status).
+    assert at.status[0].state == "error"
 
 
 def test_ct_subsamples_to_slider_count(patched_mlx, monkeypatch):
@@ -1050,6 +1055,8 @@ def test_wsi_inference_passes_patches(patched_mlx, patched_openslide, monkeypatc
     assert captured["gen_kwargs"]["repetition_penalty"] == REPETITION_PENALTY
     assert captured["gen_kwargs"]["repetition_context_size"] == REPETITION_CONTEXT_SIZE
     assert "Moderately differentiated adenocarcinoma." in [m.value for m in at.markdown]
+    # The staged st.status wraps the whole WSI pipeline and resolves to complete.
+    assert at.status[0].state == "complete"
 
 
 def test_wsi_labels_patches_in_prompt(patched_mlx, patched_openslide, monkeypatch):
@@ -1157,6 +1164,8 @@ def test_wsi_no_tissue_shows_error(patched_mlx, monkeypatch):
     assert not at.exception
     assert any("No tissue" in e.value for e in at.error)
     assert "### Response" not in [m.value for m in at.markdown]
+    # A no-tissue failure drives the st.status into its error state.
+    assert at.status[0].state == "error"
 
 
 def test_wsi_magnification_selects_pyramid_level(patched_mlx, monkeypatch):
