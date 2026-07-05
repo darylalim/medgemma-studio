@@ -560,7 +560,10 @@ def load_and_preview_image(uploaded_file, caption: str) -> Image.Image | None:
         st.image(image, caption=caption, width="stretch")
         return image
     except Exception:
-        st.error("Failed to load image. Please upload a valid image file.")
+        st.error(
+            "Failed to load image. Please upload a valid image file.",
+            icon=":material/error:",
+        )
         return None
 
 
@@ -606,7 +609,7 @@ def run_model(
             )
             return output.text
         except Exception as e:
-            st.error(f"Inference failed: {e}")
+            st.error(f"Inference failed: {e}", icon=":material/error:")
             return None
 
 
@@ -668,7 +671,9 @@ def render_ask_tab(model, processor, config):
     ).strip()
     instruction, is_thinking = tab_settings("ask", DEFAULT_INSTRUCTION_TEXT)
 
-    if st.button("Run", type="primary", disabled=not prompt, key="ask_run"):
+    if st.button(
+        "Run", type="primary", disabled=not prompt, width="stretch", key="ask_run"
+    ):
         full_instruction, max_new_tokens = get_generation_params(
             has_image=False, is_thinking=is_thinking, system_instruction=instruction
         )
@@ -691,6 +696,10 @@ def render_ask_tab(model, processor, config):
 
 
 def render_cxr_tab(model, processor, config):
+    st.caption(
+        "Analyze a chest X-ray. Add a second image to compare two studies, or turn "
+        "on 'Locate anatomy' to outline structures with bounding boxes."
+    )
     prompt = st.text_input(
         "Enter your question",
         placeholder="e.g. Describe this chest X-ray",
@@ -745,7 +754,9 @@ def render_cxr_tab(model, processor, config):
     # (not rendered) once the prompt, either upload, or the localize mode changes.
     cxr_sig = (prompt, is_localizing, _file_sig(upload1), _file_sig(upload2))
 
-    if st.button("Run", type="primary", disabled=not prompt, key="cxr_run"):
+    if st.button(
+        "Run", type="primary", disabled=not prompt, width="stretch", key="cxr_run"
+    ):
         # Localization is single-image only; with two images it is unavailable.
         localize = is_localizing and len(images) == 1
         localize_size: tuple[int, int] | None = None
@@ -813,10 +824,11 @@ def render_cxr_tab(model, processor, config):
             st.image(result["annotated"], caption="Localized anatomy", width="stretch")
             st.divider()
             st.markdown("### Detected structures")
+            # The boxes are drawn on the image above, so list the labels plainly
+            # rather than the raw normalized coordinates (cryptic to a clinician).
             st.markdown(
                 "\n".join(
-                    f"- **{box['label'] or 'unlabeled'}**: {box['box_2d']}"
-                    for box in result["boxes"]
+                    f"- **{box['label'] or 'unlabeled'}**" for box in result["boxes"]
                 )
             )
         else:
@@ -863,7 +875,11 @@ def render_ct_tab(model, processor, config):
     ct_sig = (prompt, tuple(_file_sig(f) for f in dicom_files or []), n_slices)
 
     if st.button(
-        "Run", type="primary", disabled=not (prompt and dicom_files), key="ct_run"
+        "Run",
+        type="primary",
+        disabled=not (prompt and dicom_files),
+        width="stretch",
+        key="ct_run",
     ):
         # Clear any prior run, then do all the heavy work (DICOM read, windowing,
         # inference) strictly inside the button block; persist the result so it
@@ -876,7 +892,7 @@ def render_ct_tab(model, processor, config):
             try:
                 hu_slices = load_ct_volume(dicom_files, n_slices)
             except Exception as e:
-                st.error(f"Failed to read DICOM series: {e}")
+                st.error(f"Failed to read DICOM series: {e}", icon=":material/error:")
                 hu_slices = None
             if hu_slices is None:
                 status.update(
@@ -941,13 +957,20 @@ def render_wsi_tab(model, processor, config):
         key="wsi_prompt",
     ).strip()
     slide_file = st.file_uploader("Upload a slide", type=WSI_TYPES, key="wsi_files")
-    target_mag = st.select_slider(
-        "Magnification",
-        options=WSI_MAGNIFICATIONS,
-        value=WSI_DEFAULT_MAG,
-        help="Higher magnification shows finer detail over less area. Clamped to the "
-        "slide's available pyramid levels.",
-        key="wsi_mag",
+    # segmented_control (not select_slider): these are four discrete objective-power
+    # modes, like a microscope turret, and one-tap selection beats landing a slider
+    # handle on a tick. ``or WSI_DEFAULT_MAG`` guards the (single-select) None case.
+    target_mag = (
+        st.segmented_control(
+            "Magnification",
+            options=WSI_MAGNIFICATIONS,
+            default=WSI_DEFAULT_MAG,
+            format_func=lambda m: f"{m}×",
+            help="Higher magnification shows finer detail over less area. Clamped to "
+            "the slide's available pyramid levels.",
+            key="wsi_mag",
+        )
+        or WSI_DEFAULT_MAG
     )
 
     default_patches, max_patches = ram_aware_slice_cap()
@@ -972,7 +995,11 @@ def render_wsi_tab(model, processor, config):
     wsi_sig = (prompt, _file_sig(slide_file), target_mag, n_patches)
 
     if st.button(
-        "Run", type="primary", disabled=not (prompt and slide_file), key="wsi_run"
+        "Run",
+        type="primary",
+        disabled=not (prompt and slide_file),
+        width="stretch",
+        key="wsi_run",
     ):
         # Clear any prior run, then do all the heavy work (OpenSlide read, tiling,
         # inference) strictly inside the button block; persist the result so it
@@ -987,7 +1014,7 @@ def render_wsi_tab(model, processor, config):
                     slide_file, target_mag, n_patches
                 )
             except Exception as e:
-                st.error(f"Failed to read slide: {e}")
+                st.error(f"Failed to read slide: {e}", icon=":material/error:")
                 patches = None
             if patches is None:
                 status.update(

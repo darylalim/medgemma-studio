@@ -1184,7 +1184,7 @@ def test_wsi_magnification_selects_pyramid_level(patched_mlx, monkeypatch):
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
     _upload_slide(at)
-    at.select_slider(key="wsi_mag").set_value(10).run()
+    at.segmented_control(key="wsi_mag").set_value(10).run()
     at.button(key="wsi_run").click().run()
     assert not at.exception
     assert any("~10.0x" in c.value for c in at.caption)
@@ -1256,7 +1256,9 @@ def test_wsi_stale_result_cleared_when_magnification_changes(
     _upload_slide(at)
     at.button(key="wsi_run").click().run()
     assert "Adenocarcinoma." in [m.value for m in at.markdown]
-    at.select_slider(key="wsi_mag").set_value(40).run()  # default 10 -> 40, no re-run
+    at.segmented_control(key="wsi_mag").set_value(
+        40
+    ).run()  # default 10 -> 40, no re-run
     assert not at.exception
     assert "Adenocarcinoma." not in [m.value for m in at.markdown]
     assert not any("patches sampled at ~" in c.value for c in at.caption)
