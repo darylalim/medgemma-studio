@@ -877,11 +877,11 @@ class TestMlxVlmContract:
 
     def test_public_import_surface_is_callable(self):
         # The exact import paths streamlit_app uses (see its module header).
-        from mlx_vlm import generate, load
+        from mlx_vlm import load, stream_generate
         from mlx_vlm.prompt_utils import apply_chat_template
         from mlx_vlm.utils import load_config
 
-        assert callable(generate)
+        assert callable(stream_generate)
         assert callable(load)
         assert callable(apply_chat_template)
         assert callable(load_config)
@@ -903,24 +903,25 @@ class TestMlxVlmContract:
             f"load() return arity changed; run_model unpacks exactly 2 ({ann!r})"
         )
 
-    def test_generate_accepts_run_model_kwargs(self):
-        # run_model() passes verbose + max_tokens/temperature/repetition_penalty/
-        # repetition_context_size to generate(). Only `verbose` is an explicit param
-        # today; the others ride **kwargs, so assert exactly that shape. Whether the
-        # swallowed kwargs are honored is checked by the docstring test below.
-        from mlx_vlm import generate
+    def test_stream_generate_accepts_run_model_kwargs(self):
+        # run_model() streams via stream_generate(model, processor, prompt, image,
+        # max_tokens=/temperature=/repetition_penalty=/repetition_context_size=). Those
+        # sampling kwargs ride on **kwargs, so assert exactly that shape (run_model no
+        # longer passes `verbose`). Whether the swallowed kwargs are honored is checked
+        # by the docstring test below.
+        from mlx_vlm import stream_generate
 
-        params = inspect.signature(generate).parameters
-        assert "verbose" in params, "generate() dropped the explicit 'verbose' param"
+        params = inspect.signature(stream_generate).parameters
         assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()), (
-            "generate() dropped **kwargs that the sampling kwargs ride on"
+            "stream_generate() dropped **kwargs that the sampling kwargs ride on"
         )
 
     def test_generate_documents_sampling_kwargs(self):
-        # The sampling kwargs run_model() rides on generate()'s **kwargs (max_tokens,
-        # temperature, and the f43be85 repetition-loop fix). A signature check can't
-        # prove a swallowed kwarg is honored vs silently ignored, so their presence in
-        # the public docstring is the lightweight guard that they remain supported.
+        # The sampling kwargs run_model() rides on stream_generate()'s **kwargs
+        # (max_tokens, temperature, and the repetition-loop fix). generate() is just
+        # `text += chunk.text` over stream_generate() and is where these kwargs are
+        # publicly documented; a signature check can't prove a swallowed kwarg is
+        # honored, so their presence in that docstring is the lightweight guard.
         from mlx_vlm import generate
 
         doc = (generate.__doc__ or "").lower()
@@ -933,22 +934,15 @@ class TestMlxVlmContract:
             assert kw in doc, f"generate() docstring no longer mentions {kw!r}"
 
     def test_generation_result_exposes_text(self):
-        # run_model() returns output.text. Reach the return type through generate()'s
-        # own annotation rather than importing an internal submodule, so the check
-        # stays decoupled from mlx_vlm's package layout.
-        from mlx_vlm import generate
+        # run_model() streams `for chunk in stream_generate(...): yield chunk.text`.
+        # The yielded chunks are GenerationResult (top-level importable), so guard that
+        # it still exposes `.text` — the attribute the stream accumulation depends on.
+        from mlx_vlm import GenerationResult
 
-        result_type = inspect.signature(generate).return_annotation
-        assert result_type is not inspect.Signature.empty, (
-            "generate() lost its return annotation"
-        )
-        assert not isinstance(result_type, str), (
-            f"generate() return annotation is stringized ({result_type!r})"
-        )
-        if dataclasses.is_dataclass(result_type):
-            fields = {f.name for f in dataclasses.fields(result_type)}
+        if dataclasses.is_dataclass(GenerationResult):
+            fields = {f.name for f in dataclasses.fields(GenerationResult)}
         else:
-            fields = set(dir(result_type))
+            fields = set(dir(GenerationResult))
         assert "text" in fields
 
     def test_apply_chat_template_accepts_num_images(self):

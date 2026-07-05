@@ -34,6 +34,24 @@ def _clear_caches():
     yield
 
 
+def _patch_stream(monkeypatch, generate_mock):
+    """Patch ``mlx_vlm.stream_generate`` from an old-style ``generate`` mock.
+
+    ``run_model`` now streams via ``stream_generate`` rather than calling
+    ``generate``, but the tests keep expressing the mock as the ``generate``
+    contract: ``(*a, **k) -> object with .text``. This wraps such a mock as a
+    ``stream_generate`` that yields that object as a single chunk, so ``run_model``'s
+    ``chunk.text`` + ``st.write_stream`` concatenation reproduces the full text.
+    ``stream_generate`` shares ``generate``'s ``(model, processor, prompt, image,
+    **kwargs)`` call shape, so the ``gen_args``/``gen_kwargs`` captures still hold; a
+    mock that raises still raises (when the generator is consumed by write_stream)."""
+
+    def _stream(*args, **kwargs):
+        yield generate_mock(*args, **kwargs)
+
+    monkeypatch.setattr("mlx_vlm.stream_generate", _stream)
+
+
 @pytest.fixture
 def patched_mlx(monkeypatch):
     """Replace the heavy MLX model load + inference with fast test doubles.
@@ -49,7 +67,7 @@ def patched_mlx(monkeypatch):
     )
     output = MagicMock()
     output.text = "No acute findings."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: output)
+    _patch_stream(monkeypatch, lambda *a, **k: output)
     return output
 
 
@@ -225,6 +243,26 @@ def test_ask_response_renders(app):
     assert "No acute findings." in markdowns
 
 
+def test_ask_streams_deltas_and_renders_answer_once(patched_mlx, monkeypatch):
+    # run_model streams incremental stream_generate deltas and concatenates them; the
+    # live stream placeholder is cleared, so the persisted render shows the full answer
+    # exactly once (not duplicated by the live stream + the render-outside-the-gate).
+    def _stream(*a, **k):
+        for delta in ("No ", "acute ", "findings."):
+            chunk = MagicMock()
+            chunk.text = delta
+            yield chunk
+
+    monkeypatch.setattr("mlx_vlm.stream_generate", _stream)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ask_prompt").set_value("What is a fracture?").run()
+    at.button(key="ask_run").click().run()
+    assert not at.exception
+    markdowns = [m.value for m in at.markdown]
+    assert "No acute findings." in markdowns  # deltas concatenated
+    assert sum(m == "No acute findings." for m in markdowns) == 1  # rendered once
+
+
 def test_ask_thinking_trace_renders(patched_mlx):
     patched_mlx.text = "<unused94>thought\nLet me reason.<unused95>Final answer."
     at = AppTest.from_file(APP_PATH).run()
@@ -253,7 +291,7 @@ def test_ask_inference_failure_renders_error(patched_mlx, monkeypatch):
     def _raise(*a, **k):
         raise RuntimeError("model exploded")
 
-    monkeypatch.setattr("mlx_vlm.generate", _raise)
+    _patch_stream(monkeypatch, _raise)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="ask_prompt").set_value("Why?").run()
     at.button(key="ask_run").click().run()
@@ -268,9 +306,7 @@ def test_repetition_penalty_passed_to_generate(patched_mlx, monkeypatch):
     captured = {}
     out = MagicMock()
     out.text = "ok"
-    monkeypatch.setattr(
-        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_kwargs=k) or out
-    )
+    _patch_stream(monkeypatch, lambda *a, **k: captured.update(gen_kwargs=k) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="ask_prompt").set_value("Why?").run()
     at.button(key="ask_run").click().run()
@@ -287,9 +323,7 @@ def test_ask_passes_no_image_to_model(patched_mlx, monkeypatch):
     )
     out = MagicMock()
     out.text = "No acute findings."
-    monkeypatch.setattr(
-        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
-    )
+    _patch_stream(monkeypatch, lambda *a, **k: captured.update(gen_args=a) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="ask_prompt").set_value("What is a fracture?").run()
     at.button(key="ask_run").click().run()
@@ -317,7 +351,7 @@ def test_ask_does_not_rerun_inference_on_unrelated_rerun(patched_mlx, monkeypatc
     calls = []
     out = MagicMock()
     out.text = "Cached answer."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: calls.append(1) or out)
+    _patch_stream(monkeypatch, lambda *a, **k: calls.append(1) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="ask_prompt").set_value("Why?").run()
     at.button(key="ask_run").click().run()
@@ -423,9 +457,7 @@ def test_cxr_image_inference_passes_image_to_model(patched_mlx, monkeypatch, png
     )
     out = MagicMock()
     out.text = "No acute findings."
-    monkeypatch.setattr(
-        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
-    )
+    _patch_stream(monkeypatch, lambda *a, **k: captured.update(gen_args=a) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="cxr_prompt").set_value("Describe this X-ray").run()
     at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
@@ -457,8 +489,8 @@ def test_cxr_localization_passes_square_image_to_model(patched_mlx, monkeypatch)
     captured = {}
     out = MagicMock()
     out.text = '```json\n[{"box_2d": [0, 0, 1000, 1000], "label": "frame"}]\n```'
-    monkeypatch.setattr(
-        "mlx_vlm.generate",
+    _patch_stream(
+        monkeypatch,
         lambda *a, **k: captured.update(gen_args=a, gen_kwargs=k) or out,
     )
     buf = io.BytesIO()
@@ -532,9 +564,7 @@ def test_cxr_comparison_passes_both_images(patched_mlx, monkeypatch, png_bytes):
     )
     out = MagicMock()
     out.text = "The second study shows interval improvement."
-    monkeypatch.setattr(
-        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
-    )
+    _patch_stream(monkeypatch, lambda *a, **k: captured.update(gen_args=a) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="cxr_prompt").set_value("Compare these studies").run()
     at.file_uploader(key="cxr_image1").upload(
@@ -555,9 +585,7 @@ def test_cxr_comparison_uses_larger_token_budget(patched_mlx, monkeypatch, png_b
     captured = {}
     out = MagicMock()
     out.text = "Comparison."
-    monkeypatch.setattr(
-        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_kwargs=k) or out
-    )
+    _patch_stream(monkeypatch, lambda *a, **k: captured.update(gen_kwargs=k) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="cxr_prompt").set_value("Compare these").run()
     at.file_uploader(key="cxr_image1").upload(
@@ -580,8 +608,8 @@ def test_cxr_comparison_with_thinking_renders_both(patched_mlx, monkeypatch, png
         "<unused94>thought\nComparing the two studies.<unused95>"
         "The second study shows interval clearing of the left-base opacity."
     )
-    monkeypatch.setattr(
-        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_kwargs=k) or patched_mlx
+    _patch_stream(
+        monkeypatch, lambda *a, **k: captured.update(gen_kwargs=k) or patched_mlx
     )
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="cxr_prompt").set_value("Compare these studies").run()
@@ -659,9 +687,7 @@ def test_cxr_stale_localization_toggle_runs_comparison_with_two_images(
     )
     out = MagicMock()
     out.text = "Both lungs are clear."
-    monkeypatch.setattr(
-        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_kwargs=k) or out
-    )
+    _patch_stream(monkeypatch, lambda *a, **k: captured.update(gen_kwargs=k) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="cxr_prompt").set_value("Compare these").run()
     at.file_uploader(key="cxr_image1").upload(
@@ -683,9 +709,7 @@ def test_cxr_comparison_sends_unpadded_images(patched_mlx, monkeypatch):
     captured = {}
     out = MagicMock()
     out.text = "Comparison."
-    monkeypatch.setattr(
-        "mlx_vlm.generate", lambda *a, **k: captured.update(gen_args=a) or out
-    )
+    _patch_stream(monkeypatch, lambda *a, **k: captured.update(gen_args=a) or out)
     buf = io.BytesIO()
     Image.new("RGB", (20, 10)).save(buf, format="PNG")
     wide_png = buf.getvalue()
@@ -707,7 +731,7 @@ def test_cxr_comparison_labels_images_in_prompt(patched_mlx, monkeypatch, png_by
     )
     out = MagicMock()
     out.text = "Comparison."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="cxr_prompt").set_value("Compare these").run()
     at.file_uploader(key="cxr_image1").upload(
@@ -726,7 +750,7 @@ def test_cxr_result_persists_across_rerun(patched_mlx, monkeypatch, png_bytes):
     calls = []
     out = MagicMock()
     out.text = "No acute findings."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: calls.append(1) or out)
+    _patch_stream(monkeypatch, lambda *a, **k: calls.append(1) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="cxr_prompt").set_value("Describe this X-ray").run()
     at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
@@ -829,8 +853,8 @@ def test_ct_inference_passes_windowed_slices(patched_mlx, monkeypatch):
     )
     out = MagicMock()
     out.text = "Two contiguous slices of the liver."
-    monkeypatch.setattr(
-        "mlx_vlm.generate",
+    _patch_stream(
+        monkeypatch,
         lambda *a, **k: captured.update(gen_args=a, gen_kwargs=k) or out,
     )
     at = AppTest.from_file(APP_PATH).run()
@@ -860,7 +884,7 @@ def test_ct_labels_slices_in_prompt(patched_mlx, monkeypatch):
     )
     out = MagicMock()
     out.text = "Findings."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="ct_prompt").set_value("Describe the volume").run()
     _upload_ct_pair(at)
@@ -877,8 +901,8 @@ def test_ct_with_thinking_uses_larger_budget(patched_mlx, monkeypatch):
     patched_mlx.text = (
         "<unused94>thought\nReviewing each slice.<unused95>No focal lesion."
     )
-    monkeypatch.setattr(
-        "mlx_vlm.generate",
+    _patch_stream(
+        monkeypatch,
         lambda *a, **k: captured.update(gen_kwargs=k) or patched_mlx,
     )
     at = AppTest.from_file(APP_PATH).run()
@@ -920,7 +944,7 @@ def test_ct_subsamples_to_slider_count(patched_mlx, monkeypatch):
     )
     out = MagicMock()
     out.text = "Findings."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="ct_prompt").set_value("Describe the volume").run()
     uploader = at.file_uploader(key="ct_files")
@@ -980,7 +1004,7 @@ def test_ct_result_persists_across_rerun(patched_mlx, monkeypatch):
     calls = []
     out = MagicMock()
     out.text = "Two contiguous slices of the liver."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: calls.append(1) or out)
+    _patch_stream(monkeypatch, lambda *a, **k: calls.append(1) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="ct_prompt").set_value("Any lesions?").run()
     _upload_ct_pair(at)
@@ -997,7 +1021,7 @@ def test_ct_stale_result_cleared_when_slice_count_changes(patched_mlx, monkeypat
     _force_ram_gib(monkeypatch, 32)  # slider default 8, max 16
     out = MagicMock()
     out.text = "Liver findings."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="ct_prompt").set_value("Any lesions?").run()
     _upload_ct_pair(at)
@@ -1040,8 +1064,8 @@ def test_wsi_inference_passes_patches(patched_mlx, patched_openslide, monkeypatc
     )
     out = MagicMock()
     out.text = "Moderately differentiated adenocarcinoma."
-    monkeypatch.setattr(
-        "mlx_vlm.generate",
+    _patch_stream(
+        monkeypatch,
         lambda *a, **k: captured.update(gen_args=a, gen_kwargs=k) or out,
     )
     at = AppTest.from_file(APP_PATH).run()
@@ -1072,7 +1096,7 @@ def test_wsi_labels_patches_in_prompt(patched_mlx, patched_openslide, monkeypatc
     )
     out = MagicMock()
     out.text = "Findings."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
     _upload_slide(at)
@@ -1096,7 +1120,7 @@ def test_wsi_subsamples_to_slider_count(patched_mlx, patched_openslide, monkeypa
     )
     out = MagicMock()
     out.text = "Findings."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
     _upload_slide(at)
@@ -1127,8 +1151,8 @@ def test_wsi_with_thinking_uses_larger_budget(
     patched_mlx.text = (
         "<unused94>thought\nReviewing each patch.<unused95>No malignancy seen."
     )
-    monkeypatch.setattr(
-        "mlx_vlm.generate",
+    _patch_stream(
+        monkeypatch,
         lambda *a, **k: captured.update(gen_kwargs=k) or patched_mlx,
     )
     at = AppTest.from_file(APP_PATH).run()
@@ -1184,7 +1208,7 @@ def test_wsi_magnification_selects_pyramid_level(patched_mlx, monkeypatch):
     monkeypatch.setattr("openslide.OpenSlide", lambda path: slide)
     out = MagicMock()
     out.text = "Findings."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
     _upload_slide(at)
@@ -1212,7 +1236,7 @@ def test_wsi_sparse_tissue_reduces_patch_count(patched_mlx, monkeypatch):
     )
     out = MagicMock()
     out.text = "Findings."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
     _upload_slide(at)
@@ -1228,7 +1252,7 @@ def test_wsi_result_persists_across_rerun(patched_mlx, patched_openslide, monkey
     calls = []
     out = MagicMock()
     out.text = "Moderately differentiated adenocarcinoma."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: calls.append(1) or out)
+    _patch_stream(monkeypatch, lambda *a, **k: calls.append(1) or out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
     _upload_slide(at)
@@ -1254,7 +1278,7 @@ def test_wsi_stale_result_cleared_when_magnification_changes(
     _force_ram_gib(monkeypatch, 32)
     out = MagicMock()
     out.text = "Adenocarcinoma."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
     _upload_slide(at)
@@ -1276,7 +1300,7 @@ def test_wsi_stale_result_cleared_when_patch_count_changes(
     _force_ram_gib(monkeypatch, 32)
     out = MagicMock()
     out.text = "Adenocarcinoma."
-    monkeypatch.setattr("mlx_vlm.generate", lambda *a, **k: out)
+    _patch_stream(monkeypatch, lambda *a, **k: out)
     at = AppTest.from_file(APP_PATH).run()
     at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
     _upload_slide(at)

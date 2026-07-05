@@ -1,4 +1,3 @@
-import contextlib
 import json
 import os
 import re
@@ -12,7 +11,7 @@ import openslide
 import pydicom
 import streamlit as st
 from dotenv import load_dotenv
-from mlx_vlm import generate, load
+from mlx_vlm import load, stream_generate
 from mlx_vlm.prompt_utils import apply_chat_template
 from mlx_vlm.utils import load_config
 from PIL import Image, ImageDraw
@@ -576,43 +575,55 @@ st.set_page_config(
 )
 
 
-def run_model(
-    model, processor, config, messages, images, max_new_tokens, show_spinner=True
-):
-    """Format the prompt, generate, and return the raw response text.
+def run_model(model, processor, config, messages, images, max_new_tokens):
+    """Stream generation live and return the full accumulated response text.
 
-    Wrapped in a spinner unless ``show_spinner`` is False — the CT and WSI tabs
-    drive their own ``st.status`` across preprocessing + generation and pass
-    ``show_spinner=False`` so a spinner isn't nested inside that status. On failure
-    it shows an error and returns ``None`` so callers can bail out.
+    Tokens are streamed via ``mlx_vlm.stream_generate`` into an ``st.write_stream``
+    placeholder — on a slow local model this turns a blank wait into visibly
+    arriving text — then the placeholder is cleared so the caller's persisted-render
+    block (``render_thought`` / ``show_response`` / the localization annotation) is
+    the single, clean final render. ``generate`` is itself just ``text += chunk.text``
+    over ``stream_generate``, so the returned string is identical; determinism
+    (``temperature=0`` + the repetition penalties) is preserved. Returns ``None`` on
+    failure after showing an error, so callers can bail out.
     """
     image_for_model = images or None
     num_images = len(images)
-    spinner = (
-        st.spinner("Generating response...")
-        if show_spinner
-        else contextlib.nullcontext()
-    )
-    with spinner:
-        try:
-            formatted_prompt = apply_chat_template(
-                processor, config, messages, num_images=num_images
-            )
-            output = generate(
-                model,
-                processor,
-                formatted_prompt,  # ty: ignore[invalid-argument-type]
-                image_for_model,  # ty: ignore[invalid-argument-type]
-                max_tokens=max_new_tokens,
-                temperature=0.0,
-                repetition_penalty=REPETITION_PENALTY,
-                repetition_context_size=REPETITION_CONTEXT_SIZE,
-                verbose=False,
-            )
-            return output.text
-        except Exception as e:
-            st.error(f"Inference failed: {e}", icon=":material/error:")
-            return None
+    try:
+        formatted_prompt = apply_chat_template(
+            processor, config, messages, num_images=num_images
+        )
+    except Exception as e:
+        st.error(f"Inference failed: {e}", icon=":material/error:")
+        return None
+
+    def _deltas():
+        for chunk in stream_generate(
+            model,
+            processor,
+            formatted_prompt,  # ty: ignore[invalid-argument-type]
+            image_for_model,  # ty: ignore[invalid-argument-type]
+            max_tokens=max_new_tokens,
+            temperature=0.0,
+            repetition_penalty=REPETITION_PENALTY,
+            repetition_context_size=REPETITION_CONTEXT_SIZE,
+        ):
+            # stream_generate yields GenerationResult chunks; its return annotation
+            # mislabels them as str, so the .text access needs a suppression.
+            yield chunk.text  # ty: ignore[unresolved-attribute]
+
+    placeholder = st.empty()
+    try:
+        # write_stream consumes the generator and returns the concatenated string;
+        # the thinking sentinels flash briefly here but are cleaned up on the
+        # persisted render below via parse_response / render_thought.
+        return placeholder.write_stream(_deltas())
+    except Exception as e:
+        st.error(f"Inference failed: {e}", icon=":material/error:")
+        return None
+    finally:
+        # Clear the live stream so the persisted-render block isn't rendered twice.
+        placeholder.empty()
 
 
 def render_thought(raw_response: str, is_thinking: bool) -> str:
@@ -922,13 +933,14 @@ def render_ct_tab(model, processor, config):
         width="stretch",
         key="ct_run",
     ):
-        # Clear any prior run, then do all the heavy work (DICOM read, windowing,
-        # inference) strictly inside the button block; persist the result so it
-        # survives later reruns (see render_ask_tab). An st.status narrates the
-        # phases so the otherwise-silent DICOM read + windowing (which run before
-        # generation) show continuous progress instead of a frozen-looking gap.
+        # Clear any prior run, then do the heavy work inside the button block;
+        # persist the result so it survives later reruns (see render_ask_tab). An
+        # st.status narrates the otherwise-silent preprocessing (DICOM read +
+        # windowing); generation then streams in the main area below the status, so
+        # its live tokens aren't buried in a collapsed box.
         st.session_state["ct_result"] = None
-        with st.status("Analyzing CT series…", expanded=False) as status:
+        slice_images = None
+        with st.status("Preparing CT series…", expanded=False) as status:
             status.update(label="Reading DICOM series…")
             try:
                 hu_slices = load_ct_volume(dicom_files, n_slices)
@@ -942,39 +954,31 @@ def render_ct_tab(model, processor, config):
             else:
                 status.update(label="Windowing slices…")
                 slice_images = [window_ct_slice(hu) for hu in hu_slices]
-                labels = [f"SLICE {i}" for i in range(1, len(slice_images) + 1)]
-                full_instruction, max_new_tokens = get_generation_params(
-                    has_image=True,
-                    is_thinking=is_thinking,
-                    system_instruction=instruction,
-                    is_ct=True,
+                status.update(
+                    label=f"Prepared {len(slice_images)} slices", state="complete"
                 )
-                messages = build_messages(
-                    prompt, full_instruction, slice_images, image_labels=labels
-                )
-                status.update(label=f"Running MedGemma on {len(slice_images)} slices…")
-                raw = run_model(
-                    model,
-                    processor,
-                    config,
-                    messages,
-                    slice_images,
-                    max_new_tokens,
-                    show_spinner=False,
-                )
-                if raw is None:
-                    status.update(
-                        label="Inference failed", state="error", expanded=True
-                    )
-                else:
-                    st.session_state["ct_result"] = {
-                        "preview": slice_images[0],
-                        "count": len(slice_images),
-                        "raw": raw,
-                        "is_thinking": is_thinking,
-                        "sig": ct_sig,
-                    }
-                    status.update(label="Analysis complete", state="complete")
+        if slice_images is not None:
+            labels = [f"SLICE {i}" for i in range(1, len(slice_images) + 1)]
+            full_instruction, max_new_tokens = get_generation_params(
+                has_image=True,
+                is_thinking=is_thinking,
+                system_instruction=instruction,
+                is_ct=True,
+            )
+            messages = build_messages(
+                prompt, full_instruction, slice_images, image_labels=labels
+            )
+            raw = run_model(
+                model, processor, config, messages, slice_images, max_new_tokens
+            )
+            if raw is not None:
+                st.session_state["ct_result"] = {
+                    "preview": slice_images[0],
+                    "count": len(slice_images),
+                    "raw": raw,
+                    "is_thinking": is_thinking,
+                    "sig": ct_sig,
+                }
 
     result = fresh_result_or_hint("ct_result", ct_sig)
     if result is None:
@@ -1043,13 +1047,15 @@ def render_wsi_tab(model, processor, config):
         width="stretch",
         key="wsi_run",
     ):
-        # Clear any prior run, then do all the heavy work (OpenSlide read, tiling,
-        # inference) strictly inside the button block; persist the result so it
-        # survives later reruns (see render_ask_tab). An st.status narrates the
-        # phases so the otherwise-silent slide read + tissue sampling (which can
-        # take many seconds on a multi-GB slide) show progress before generation.
+        # Clear any prior run, then do the heavy work inside the button block;
+        # persist the result so it survives later reruns (see render_ask_tab). An
+        # st.status narrates the otherwise-silent slide read + tissue sampling (which
+        # can take many seconds on a multi-GB slide); generation then streams in the
+        # main area below the status, so its live tokens aren't buried in a box.
         st.session_state["wsi_result"] = None
-        with st.status("Analyzing slide…", expanded=False) as status:
+        overlay = None
+        actual_mag = None
+        with st.status("Preparing slide…", expanded=False) as status:
             status.update(label="Reading slide and sampling tissue…")
             try:
                 patches, overlay, actual_mag = load_wsi_patches(
@@ -1063,41 +1069,31 @@ def render_wsi_tab(model, processor, config):
                     label="Could not read slide", state="error", expanded=True
                 )
             else:
-                labels = [f"PATCH {i}" for i in range(1, len(patches) + 1)]
-                full_instruction, max_new_tokens = get_generation_params(
-                    has_image=True,
-                    is_thinking=is_thinking,
-                    system_instruction=instruction,
-                    is_wsi=True,
+                status.update(
+                    label=f"Prepared {len(patches)} patches", state="complete"
                 )
-                messages = build_messages(
-                    prompt, full_instruction, patches, image_labels=labels
-                )
-                status.update(label=f"Running MedGemma on {len(patches)} patches…")
-                raw = run_model(
-                    model,
-                    processor,
-                    config,
-                    messages,
-                    patches,
-                    max_new_tokens,
-                    show_spinner=False,
-                )
-                if raw is None:
-                    status.update(
-                        label="Inference failed", state="error", expanded=True
-                    )
-                else:
-                    st.session_state["wsi_result"] = {
-                        "overlay": overlay,
-                        "actual_mag": actual_mag,
-                        "count": len(patches),
-                        "preview": patches[0],
-                        "raw": raw,
-                        "is_thinking": is_thinking,
-                        "sig": wsi_sig,
-                    }
-                    status.update(label="Analysis complete", state="complete")
+        if patches is not None:
+            labels = [f"PATCH {i}" for i in range(1, len(patches) + 1)]
+            full_instruction, max_new_tokens = get_generation_params(
+                has_image=True,
+                is_thinking=is_thinking,
+                system_instruction=instruction,
+                is_wsi=True,
+            )
+            messages = build_messages(
+                prompt, full_instruction, patches, image_labels=labels
+            )
+            raw = run_model(model, processor, config, messages, patches, max_new_tokens)
+            if raw is not None:
+                st.session_state["wsi_result"] = {
+                    "overlay": overlay,
+                    "actual_mag": actual_mag,
+                    "count": len(patches),
+                    "preview": patches[0],
+                    "raw": raw,
+                    "is_thinking": is_thinking,
+                    "sig": wsi_sig,
+                }
 
     result = fresh_result_or_hint("wsi_result", wsi_sig)
     if result is None:
