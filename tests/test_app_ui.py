@@ -159,8 +159,9 @@ def test_four_tabs_render(app):
 
 
 def test_no_expander_on_first_render(app):
-    # The "Thinking trace" expander appears only after a thinking response.
-    assert len(app.expander) == 0
+    # Each tab has a collapsed "Model settings" expander, but the "Thinking trace"
+    # expander appears only after a thinking response.
+    assert not any(e.label == "Thinking trace" for e in app.expander)
 
 
 def test_each_tab_has_independent_settings(app):
@@ -243,7 +244,8 @@ def test_ask_thinking_no_markers_no_expander(patched_mlx):
     at.toggle(key="ask_thinking").set_value(True).run()
     at.button(key="ask_run").click().run()
     assert not at.exception
-    assert len(at.expander) == 0  # no spurious "Thinking trace" expander
+    # no spurious "Thinking trace" expander (the "Model settings" ones don't count)
+    assert not any(e.label == "Thinking trace" for e in at.expander)
     assert "Just a plain reply without markers." in [m.value for m in at.markdown]
 
 
@@ -590,7 +592,7 @@ def test_cxr_comparison_with_thinking_renders_both(patched_mlx, monkeypatch, png
     assert not at.exception
     assert captured["act_kwargs"]["num_images"] == 2  # both images still sent
     assert captured["gen_kwargs"]["max_tokens"] == 1600  # thinking+comparison budget
-    assert len(at.expander) == 1  # the "Thinking trace" expander
+    assert any(e.label == "Thinking trace" for e in at.expander)
     markdowns = [m.value for m in at.markdown]
     assert "Comparing the two studies." in markdowns  # thinking trace
     assert "### Response" in markdowns
@@ -884,7 +886,7 @@ def test_ct_with_thinking_uses_larger_budget(patched_mlx, monkeypatch):
     at.button(key="ct_run").click().run()
     assert not at.exception
     assert captured["gen_kwargs"]["max_tokens"] == 2500  # thinking + CT budget
-    assert len(at.expander) == 1  # thinking trace
+    assert any(e.label == "Thinking trace" for e in at.expander)  # thinking trace
     markdowns = [m.value for m in at.markdown]
     assert "Reviewing each slice." in markdowns
     assert "No focal lesion." in markdowns
@@ -1134,7 +1136,7 @@ def test_wsi_with_thinking_uses_larger_budget(
     at.button(key="wsi_run").click().run()
     assert not at.exception
     assert captured["gen_kwargs"]["max_tokens"] == 2500  # thinking + WSI budget
-    assert len(at.expander) == 1  # thinking trace
+    assert any(e.label == "Thinking trace" for e in at.expander)  # thinking trace
     markdowns = [m.value for m in at.markdown]
     assert "Reviewing each patch." in markdowns
     assert "No malignancy seen." in markdowns

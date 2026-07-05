@@ -547,17 +547,19 @@ def show_response(response: str) -> None:
     st.markdown(response)
 
 
-def load_and_preview_image(uploaded_file, caption: str) -> Image.Image | None:
-    """Open an uploaded file as an image and preview it under ``caption``.
+def load_uploaded_image(uploaded_file) -> Image.Image | None:
+    """Open an uploaded file as an image (loading is decoupled from previewing so
+    the CXR tab can lay two studies out side by side in comparison mode).
 
-    Returns the PIL image, or None if no file was provided or it failed to load
-    (in which case an error is shown).
+    Returns the PIL image, or None if no file was provided or it failed to load (in
+    which case an error is shown). ``image.load()`` forces the decode so invalid data
+    fails here rather than later at ``st.image`` time.
     """
     if uploaded_file is None:
         return None
     try:
         image = Image.open(uploaded_file)
-        st.image(image, caption=caption, width="stretch")
+        image.load()
         return image
     except Exception:
         st.error(
@@ -643,13 +645,18 @@ def tab_settings(
     def _mark_touched():
         st.session_state[touched_key] = True
 
-    instruction = st.text_area(
-        "System instruction",
-        key=instr_key,
-        height=100,
-        on_change=_mark_touched,
-    )
-    is_thinking = st.toggle("Thinking", key=f"{key_prefix}_thinking")
+    # Tuck the persona + thinking toggle (advanced, rarely-edited) into a collapsed
+    # expander so the primary flow — prompt → upload → Run — leads each tab. The
+    # widgets are still created every run, so the auto_switch persona tracking and
+    # all key-based lookups are unaffected.
+    with st.expander("Model settings", expanded=False):
+        instruction = st.text_area(
+            "System instruction",
+            key=instr_key,
+            height=100,
+            on_change=_mark_touched,
+        )
+        is_thinking = st.toggle("Thinking", key=f"{key_prefix}_thinking")
     return instruction, is_thinking
 
 
@@ -709,7 +716,7 @@ def render_cxr_tab(model, processor, config):
     upload1 = st.file_uploader(
         "Upload a chest X-ray", type=IMAGE_TYPES, key="cxr_image1"
     )
-    image1 = load_and_preview_image(upload1, caption="Uploaded image")
+    image1 = load_uploaded_image(upload1)
     # A second slot appears only once the first image exists, so the model can
     # compare two studies (e.g. longitudinal CXR) in a single prompt.
     upload2 = None
@@ -720,7 +727,18 @@ def render_cxr_tab(model, processor, config):
             type=IMAGE_TYPES,
             key="cxr_image2",
         )
-        image2 = load_and_preview_image(upload2, caption="Second image")
+        image2 = load_uploaded_image(upload2)
+
+    # Preview side by side in comparison mode — seeing both studies at once is the
+    # whole point of a longitudinal read; otherwise a single full-width preview.
+    if image1 is not None and image2 is not None:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(image1, caption="First image", width="stretch")
+        with col2:
+            st.image(image2, caption="Second image", width="stretch")
+    elif image1 is not None:
+        st.image(image1, caption="Uploaded image", width="stretch")
 
     images = [img for img in (image1, image2) if img is not None]
     has_image = len(images) >= 1
