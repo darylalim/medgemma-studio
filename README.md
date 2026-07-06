@@ -1,8 +1,15 @@
 # MedGemma Studio
 
-[![CI](https://github.com/darylalim/medgemma-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/medgemma-studio/actions/workflows/ci.yml)
+[![CI](https://github.com/darylalim/medgemma-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/medgemma-studio/actions/workflows/ci.yml) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 Streamlit application for analyzing medical text and images using Google [MedGemma](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) on Apple Silicon with MLX.
+
+## Disclaimer
+
+> [!WARNING]
+> **Research and educational use only — not a medical device.** MedGemma Studio is not for clinical use, diagnosis, or treatment. Its AI-generated outputs may be inaccurate and are not medical advice; always consult a qualified healthcare professional.
+
+Using MedGemma through this app is subject to Google's [Health AI Developer Foundations Terms of Use](https://developers.google.com/health-ai-developer-foundations/terms), which govern the model separately from this project's [license](#license).
 
 ## Features
 
@@ -65,3 +72,9 @@ Linting uses a curated ruff rule set (`E`, `F`, `I`, `UP`, `B`, `SIM`, `C4`); se
 Every push to `main` and every pull request runs these same four gates on GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) on an Apple-Silicon runner — the CI badge above reflects the latest run. The workflow's `uv sync --locked` step also fails if `uv.lock` has drifted from `pyproject.toml`.
 
 If you use [Claude Code](https://claude.com/claude-code) in this repo, `.claude/settings.json` wires the commands above into hooks: edited Python files are auto-formatted (`ruff`) and type-checked (`ty`), the test suite runs when Claude finishes a turn that touched code or config (docs/chat turns are skipped), and writes to `.env`/`.streamlit/secrets.toml`/`uv.lock` are blocked. The `.claude/settings.json` config is itself guarded by `TestHooksConfig` — as are the repo's other checked-in assets (the theme, the CI workflow, and this project's `CLAUDE.md`) via `TestThemeConfig` / `TestCiWorkflow` / `TestClaudeMd`, so a config or doc that drifts from the code fails a test.
+
+## License
+
+This project's source code is licensed under the [Apache License 2.0](LICENSE) (`Apache-2.0`).
+
+The MedGemma model is **not** covered by that license. It is distributed under Google's [Health AI Developer Foundations Terms of Use](https://developers.google.com/health-ai-developer-foundations/terms) and downloads separately from Hugging Face at runtime; your use of the model is governed by those terms.

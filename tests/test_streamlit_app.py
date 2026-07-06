@@ -1439,6 +1439,7 @@ class TestClaudeMd:
             "pyproject.toml",
             "uv.lock",
             "README.md",
+            "LICENSE",
         ]
         for rel in key_paths:
             assert (self.ROOT / rel).is_file(), (
@@ -1559,3 +1560,81 @@ class TestDocsMatchSource:
         for name, doc in self._docs():
             missing = [code for code in select if f"`{code}`" not in doc]
             assert not missing, f"{name} does not document ruff rules {missing}"
+
+    def test_license_matches_source(self):
+        # pyproject's [project].license is the SPDX source of truth; both docs cite that
+        # exact identifier, so a license swap not mirrored into the prose fails here.
+        # "Apache-2.0" is distinctive (no .tif/.tiff prefix-collision risk), so a plain
+        # membership check is unambiguous.
+        with open(self.ROOT / "pyproject.toml", "rb") as f:
+            license_id = tomllib.load(f)["project"]["license"]
+        for name, doc in self._docs():
+            assert license_id in doc, (
+                f"{name} does not document the license {license_id!r}"
+            )
+
+
+class TestLicense:
+    """Guard the licensing + medical-use assets added with the LICENSE file — a
+    checked-in asset like the theme/hooks/CI config. The LICENSE text, the pyproject
+    SPDX declaration, and the README's License + Disclaimer sections must stay mutually
+    consistent, so swapping one (pyproject flipped to MIT with the Apache text left in
+    place, LICENSE deleted out from under `license-files`, or the not-a-medical-device
+    notice dropped) fails here instead of shipping a contradiction. The license
+    id is also cross-checked against both prose docs by TestDocsMatchSource."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def _pyproject(self) -> dict[str, typing.Any]:
+        with open(self.ROOT / "pyproject.toml", "rb") as f:
+            return tomllib.load(f)
+
+    def test_license_file_is_apache_2_0(self):
+        # The LICENSE is the source form of the grant; assert it is the Apache-2.0 text
+        # and carries the FILLED copyright line, not the bracketed placeholder. A bare
+        # "Copyright" check is vacuous: the word is in the Apache body itself.
+        text = (self.ROOT / "LICENSE").read_text(encoding="utf-8")
+        assert "Apache License" in text
+        assert "Version 2.0" in text
+        assert "Copyright 2026 Daryl Lim" in text, (
+            "LICENSE copyright line is unfilled or the holder/year changed"
+        )
+
+    def test_pyproject_declares_apache_2_0(self):
+        # The packaging metadata must declare the same license GitHub detects from the
+        # file, so the About panel and pyproject never disagree.
+        assert self._pyproject()["project"]["license"] == "Apache-2.0"
+
+    def test_pyproject_license_files_resolve(self):
+        # Every license-files glob must match a real file, so renaming/deleting LICENSE
+        # while leaving the declaration dangling fails here.
+        license_files = self._pyproject()["project"]["license-files"]
+        assert license_files, "pyproject declares no license-files"
+        for pattern in license_files:
+            assert list(self.ROOT.glob(pattern)), (
+                f"license-files pattern {pattern!r} matches no file"
+            )
+
+    def test_readme_documents_license(self):
+        # The README must carry a License section that links the LICENSE file, so the
+        # code license stays discoverable to a reader (not only to GitHub's scanner).
+        readme = (self.ROOT / "README.md").read_text(encoding="utf-8")
+        assert "## License" in readme
+        # Scope the link check to the section: the top-of-file badge also ends in
+        # `](LICENSE)`, so a whole-file check would pass even if the section dropped
+        # its link. The `## License` assert above guarantees the split yields 2 parts.
+        section = readme.split("## License", 1)[1]
+        assert "(LICENSE)" in section, "README License section does not link LICENSE"
+
+    def test_readme_has_medical_use_disclaimer(self):
+        # Safety-critical for a medical tool: guard the scope disclaimer from silent
+        # removal. The not-a-medical-device / not-medical-advice notice and the pointer
+        # to the model's separate HAI-DEF terms must all survive a README edit.
+        readme = (self.ROOT / "README.md").read_text(encoding="utf-8")
+        assert "## Disclaimer" in readme
+        low = readme.lower()
+        assert "not a medical device" in low
+        assert "not medical advice" in low
+        assert "Health AI Developer Foundations" in readme, (
+            "README no longer points to the model's HAI-DEF terms"
+        )
