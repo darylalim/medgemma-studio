@@ -27,6 +27,10 @@ When working with Python, invoke the relevant `/astral:<skill>` (`/astral:uv`, `
 
 Each hook `cd`s into `$CLAUDE_PROJECT_DIR` (guarded so an unset/empty value is a clean skip). Personal overrides belong in `.claude/settings.local.json` (gitignored). The shared config is guarded by `TestHooksConfig`, which both structurally validates it and **behaviorally** executes each command to assert its real exit codes (see Tests).
 
+## Continuous integration
+
+`.github/workflows/ci.yml` (GitHub Actions) runs the **same four gates as the hooks** on every push to `main`, every pull request, and on-demand (`workflow_dispatch`) — so a contributor without the local hooks can't merge a lint/format/type/test regression. It runs on a `macos-15` (Apple-Silicon / arm64) runner: the repo is public, so macOS minutes are free, and matching the MLX target means the `TestMlxVlmContract` guard exercises the *shipped* backend rather than a proxy Linux platform. Steps: `uv sync --locked` (installs deps **and** fails if `uv.lock` has drifted from `pyproject.toml` — so a version bump must be lock-synced via `uv lock`, never hand-edited), then `ruff check .`, `ruff format --check .` (verify formatting, never reformat in CI), `ty check`, and `pytest`. A `concurrency` group cancels superseded runs on the same ref. The workflow asset itself is guarded by `TestCiWorkflow` (parses as YAML, every job on a `macos-*` runner, the four gates, locked sync, the push/PR/dispatch triggers, and — encoding the command-injection property — no `${{ }}` expression reaching a shell `run:` step; see Tests). The CI **badge** is in `README.md`.
+
 ## Architecture
 
 Single-file app (`streamlit_app.py`) with the following structure:

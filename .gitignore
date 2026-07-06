@@ -13,7 +13,7 @@ __pycache__/
 .venv/
 .python-version
 
-# Tool caches
+# Tool caches (from the ruff / ty / pytest gates — run locally via hooks and in CI)
 .pytest_cache/
 .ruff_cache/
 .ty_cache/
