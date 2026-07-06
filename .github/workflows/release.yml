@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]           # a pushed vX.Y.Z tag cuts the release; nothing else fires it
+  workflow_dispatch:        # manual re-run against an existing tag (dispatch from the tag)
+
+permissions:
+  contents: write           # create a GitHub Release; nothing more (CI stays read-only)
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # never interrupt an in-flight publish
+
+jobs:
+  release:
+    runs-on: ubuntu-latest  # no MLX here — just verify the version and call gh; the
+    timeout-minutes: 10     # arm64/macOS parity that CI needs doesn't apply to publishing
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify tag matches pyproject version
+        # The tag is the release's identity; pyproject.version is the source of truth.
+        # TAG comes in via env (never interpolated into the script — same injection guard
+        # as CI), so a v0.7.6 tag pushed while pyproject still says 0.7.5 fails HERE
+        # instead of publishing a release whose number lies about the code it points at.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::tag $TAG does not match pyproject version $version (expected v$version)"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        # Auto-generate notes from the conventional-commit history since the previous
+        # tag — no hand-maintained CHANGELOG to drift. --verify-tag refuses a dangling tag.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag

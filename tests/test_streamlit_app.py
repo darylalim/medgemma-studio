@@ -1401,6 +1401,102 @@ class TestCiWorkflow:
                 )
 
 
+class TestReleaseWorkflow:
+    """Guard the .github/workflows/release.yml GitHub Actions workflow — the tag-driven
+    publisher, sibling to the ci.yml guarded by TestCiWorkflow. A checked-in asset, so
+    the file must parse as YAML, fire ONLY on a pushed `v*` tag, hold `contents: write`
+    (a release needs write — but nothing more), verify the pushed tag matches the
+    pyproject version before publishing (the tag==version check lives here, at release
+    time, not as a pytest that would fail between a bump and its tag), and create the
+    release with auto-generated notes. It also re-pins the same injection property as
+    CI: no `${{ }}` expression may reach a shell `run:` step, so the ref_name naming the
+    tag is read via env, never interpolated into a command."""
+
+    WORKFLOW = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release.yml"
+    )
+
+    def _doc(self) -> dict:
+        # Imported inside the test (like TestCiWorkflow) so a missing dep or moved path
+        # fails only this check, not collection of the whole suite.
+        import yaml
+
+        with open(self.WORKFLOW) as f:
+            return yaml.safe_load(f)  # raises if not valid YAML
+
+    def _on(self, doc: dict) -> dict:
+        # PyYAML parses the bare `on:` key as the boolean True (YAML 1.1); look it up
+        # under both spellings rather than assuming a string "on" key.
+        return doc.get("on", doc.get(True))
+
+    def _steps(self, doc: dict) -> list[dict]:
+        return [step for job in doc["jobs"].values() for step in job["steps"]]
+
+    def _run_commands(self, doc: dict) -> str:
+        return "\n".join(s["run"] for s in self._steps(doc) if "run" in s)
+
+    def test_workflow_exists_and_parses(self):
+        assert self.WORKFLOW.is_file()
+        assert isinstance(self._doc(), dict)
+
+    def test_triggers_only_on_version_tags(self):
+        # The release must fire on a pushed vX.Y.Z tag and NOT on a branch push (a
+        # branch trigger would republish on every commit to main). Pin the tag filter
+        # and assert no branch push trigger sneaks in.
+        on = self._on(self._doc())
+        assert "tags" in on["push"], "release.yml push trigger has no tag filter"
+        assert any(str(pat).startswith("v") for pat in on["push"]["tags"]), (
+            "release.yml does not fire on v* tags"
+        )
+        assert "branches" not in on["push"], (
+            "release.yml fires on branch pushes — it would republish on every commit"
+        )
+
+    def test_token_can_write_releases_but_no_more(self):
+        # A release must CREATE a GitHub Release, so contents:write is required here
+        # (unlike CI, which is read-only) — but nothing broader (no packages, id-token,
+        # etc.), so a compromised action can't escalate past publishing a release.
+        assert self._doc().get("permissions") == {"contents": "write"}
+
+    def test_verifies_tag_matches_pyproject_version(self):
+        # The release-time drift guard: the workflow reads pyproject.toml and compares
+        # it to the tag, so a v0.7.6 tag pushed while pyproject still says 0.7.5 fails
+        # the job instead of publishing a release whose number lies about the code.
+        cmds = self._run_commands(self._doc())
+        assert "pyproject.toml" in cmds, (
+            "release.yml never reads pyproject.toml to verify the tag"
+        )
+
+    def test_creates_release_with_generated_notes(self):
+        # The publish step itself: `gh release create` with auto-generated notes, so the
+        # notes come from the commit history (no hand-maintained CHANGELOG to drift).
+        cmds = self._run_commands(self._doc())
+        assert "gh release create" in cmds
+        assert "--generate-notes" in cmds
+
+    def test_no_expression_flows_into_a_run_step(self):
+        # Same injection guard as CI: a ${{ }} expression interpolated into a shell
+        # `run:` block is the classic Actions command-injection sink. github.ref_name
+        # (the tag) must reach the script via env, never spliced into the command.
+        offenders = [
+            s["run"] for s in self._steps(self._doc()) if "${{" in s.get("run", "")
+        ]
+        assert not offenders, f"expression flows into run step(s): {offenders}"
+
+    def test_no_gate_neutralizes_itself(self):
+        # A stray `continue-on-error: true` would let the version-mismatch check pass
+        # silently and publish a mislabeled release. Ban the non-blocking opt-out at
+        # job and step scope (conditional `if:` steps stay legitimate).
+        for name, job in self._doc()["jobs"].items():
+            assert job.get("continue-on-error") is not True, (
+                f"job {name} is non-blocking"
+            )
+            for step in job["steps"]:
+                assert step.get("continue-on-error") is not True, (
+                    f"job {name}: step {step.get('name')!r} is non-blocking"
+                )
+
+
 class TestClaudeMd:
     """Guard CLAUDE.md, the project context file loaded into every session. Like
     TestThemeConfig/TestHooksConfig/TestCiWorkflow, this checks a real checked-in asset
@@ -1435,6 +1531,7 @@ class TestClaudeMd:
             "streamlit_app.py",
             ".claude/settings.json",
             ".github/workflows/ci.yml",
+            ".github/workflows/release.yml",
             ".streamlit/config.toml",
             "pyproject.toml",
             "uv.lock",

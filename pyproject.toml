@@ -1,6 +1,6 @@
 [project]
 name = "medgemma-studio"
-version = "0.7.5"
+version = "0.7.6"
 description = "Streamlit application for analyzing medical text and images using Google MedGemma on Apple Silicon with MLX."
 readme = "README.md"
 license = "Apache-2.0"
