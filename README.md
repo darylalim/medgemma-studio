@@ -1,5 +1,7 @@
 # MedGemma Studio
 
+[![CI](https://github.com/darylalim/medgemma-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/medgemma-studio/actions/workflows/ci.yml)
+
 Streamlit application for analyzing medical text and images using Google [MedGemma](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) on Apple Silicon with MLX.
 
 ## Features
