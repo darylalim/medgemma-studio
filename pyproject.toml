@@ -17,6 +17,11 @@ dependencies = [
     "streamlit>=1.58",
 ]
 
+[project.urls]
+Repository = "https://github.com/darylalim/medgemma-studio"
+Issues = "https://github.com/darylalim/medgemma-studio/issues"
+Changelog = "https://github.com/darylalim/medgemma-studio/releases"
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
