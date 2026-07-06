@@ -20,6 +20,8 @@ __pycache__/
 
 # Claude Code — share hooks via .claude/settings.json; ignore personal overrides
 .claude/settings.local.json
+# Per-turn sentinel written by the PostToolUse hook, consumed by the Stop hook
+.claude/.tests-needed
 
 # Local test data: chest X-rays in samples/cxr/ (comparison / Locate-anatomy), a CT
 # DICOM series in samples/ct/, and a whole-slide image in samples/wsi/. Keep the

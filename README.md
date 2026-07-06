@@ -60,4 +60,4 @@ uv run pytest                     # Run tests
 
 Linting uses a curated ruff rule set (`E`, `F`, `I`, `UP`, `B`, `SIM`, `C4`); see `[tool.ruff.lint]` in `pyproject.toml`.
 
-If you use [Claude Code](https://claude.com/claude-code) in this repo, `.claude/settings.json` wires the commands above into hooks: edited Python files are auto-formatted (`ruff`) and type-checked (`ty`), the test suite runs when Claude finishes a turn, and writes to `.env`/`.streamlit/secrets.toml`/`uv.lock` are blocked. The `.claude/settings.json` config itself is guarded by `TestHooksConfig`.
+If you use [Claude Code](https://claude.com/claude-code) in this repo, `.claude/settings.json` wires the commands above into hooks: edited Python files are auto-formatted (`ruff`) and type-checked (`ty`), the test suite runs when Claude finishes a turn that touched code or config (docs/chat turns are skipped), and writes to `.env`/`.streamlit/secrets.toml`/`uv.lock` are blocked. The `.claude/settings.json` config itself is guarded by `TestHooksConfig`.

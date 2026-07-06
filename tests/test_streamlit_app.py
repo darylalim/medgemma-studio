@@ -3,6 +3,7 @@ import inspect
 import io
 import json
 import os
+import shutil
 import subprocess
 import tomllib
 import typing
@@ -1021,7 +1022,14 @@ class TestHooksConfig:
     well-formed {type: "command", command} entry whose command is valid shell (checked
     against the real interpreter with `sh -n`, mirroring the theme guard's real-key
     check), and the three configured events must stay wired so a dropped or typo'd hook
-    fails here instead of silently no-op'ing at runtime."""
+    fails here instead of silently no-op'ing at runtime.
+
+    Beyond those structural checks, the second half of the class runs the hook commands
+    behaviorally — piping mock tool-event JSON on stdin and driving them with a fake
+    `uv` on PATH — and asserts their real EXIT CODES and side effects (block vs allow,
+    fail closed, run vs skip). Substring checks alone pass through silent
+    regressions (an inverted `exit 2`, a mangled `*.py` gate, a dropped secrets.toml
+    arm); executing the command is what actually pins the behavior."""
 
     SETTINGS = Path(__file__).resolve().parent.parent / ".claude" / "settings.json"
 
@@ -1068,9 +1076,11 @@ class TestHooksConfig:
                     )
 
     def test_secret_guard_covers_env_and_lockfile(self):
-        # The PreToolUse guard must keep protecting the HF token and the lockfile.
+        # The PreToolUse guard must keep protecting the HF token, Streamlit secrets, and
+        # the lockfile. (Behaviorally re-verified below; kept as a cheap intent pin.)
         guard = self._commands_for("PreToolUse")
         assert ".env" in guard
+        assert "secrets.toml" in guard
         assert "uv.lock" in guard
 
     def test_edit_hooks_run_formatter_and_type_checker(self):
@@ -1084,3 +1094,211 @@ class TestHooksConfig:
         stop = self._commands_for("Stop")
         assert "pytest" in stop
         assert "stop_hook_active" in stop
+
+    # --- Behavioral checks: execute the commands and assert real exit codes ---------
+
+    requires_jq = pytest.mark.skipif(
+        shutil.which("jq") is None, reason="hook commands parse stdin with jq"
+    )
+
+    def _command(self, event: str, needle: str = "") -> str:
+        # The lone command for single-hook events, or the one matching `needle`.
+        cmds = [h["command"] for g in self._hooks()[event] for h in g["hooks"]]
+        if not needle:
+            return cmds[0]
+        return next(c for c in cmds if needle in c)
+
+    @staticmethod
+    def _run(command: str, payload: dict, env: dict | None = None):
+        # Run a hook as Claude Code does: the tool-event JSON arrives on stdin.
+        return subprocess.run(
+            ["/bin/sh", "-c", command],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+    @staticmethod
+    def _shim(bindir: Path, name: str, body: str) -> None:
+        exe = bindir / name
+        exe.write_text("#!/bin/sh\n" + body)
+        exe.chmod(0o755)
+
+    def _hook_env(self, bindir: Path, root: Path) -> dict:
+        # Real env + a fake tool dir on PATH + the project-root the hooks cd into.
+        return {
+            **os.environ,
+            "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+            "CLAUDE_PROJECT_DIR": str(root),
+        }
+
+    @requires_jq
+    @pytest.mark.parametrize(
+        ("rel", "expected"),
+        [
+            (".env", 2),  # the HF-token file
+            (".env.local", 2),  # dotenv variant
+            (".ENV", 2),  # case-insensitive volume -> same file
+            (".streamlit/secrets.toml", 2),
+            ("uv.lock", 2),
+            (".env.example", 0),  # template must stay editable
+            ("streamlit_app.py", 0),
+            ("README.md", 0),
+        ],
+    )
+    def test_pretooluse_guard_blocks_protected_allows_normal(self, rel, expected):
+        # Execute the guard with a mock Edit payload; assert it blocks (2) / allows (0).
+        r = self._run(
+            self._command("PreToolUse"), {"tool_input": {"file_path": f"/proj/{rel}"}}
+        )
+        assert r.returncode == expected, (
+            f"{rel}: exit {r.returncode} (stderr: {r.stderr})"
+        )
+        if expected == 2:
+            assert "Blocked" in r.stderr
+
+    def test_pretooluse_guard_fails_closed_without_jq(self, tmp_path):
+        # If jq is absent from PATH the guard must BLOCK (exit 2), never fall open.
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        r = self._run(
+            self._command("PreToolUse"),
+            {"tool_input": {"file_path": "/proj/.env"}},
+            env={**os.environ, "PATH": str(empty)},
+        )
+        assert r.returncode == 2
+
+    @requires_jq
+    def test_stop_hook_skips_pytest_when_hook_active(self, tmp_path):
+        # Loop guard: on a hook-continued stop, exit 0 WITHOUT re-running the suite.
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        (root / ".claude" / ".tests-needed").touch()  # sentinel present...
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        self._shim(bindir, "uv", f'touch "{tmp_path}/uv-ran"\n')
+        r = self._run(
+            self._command("Stop"),
+            {"stop_hook_active": True},
+            env=self._hook_env(bindir, root),
+        )
+        assert r.returncode == 0
+        assert not (tmp_path / "uv-ran").exists()  # ...but pytest was never invoked
+
+    @requires_jq
+    def test_stop_hook_skips_pytest_without_sentinel(self, tmp_path):
+        # Change gate: no testable edit this turn -> no sentinel -> skip the ~11s suite.
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        self._shim(bindir, "uv", f'touch "{tmp_path}/uv-ran"\n')
+        r = self._run(
+            self._command("Stop"),
+            {"stop_hook_active": False},
+            env=self._hook_env(bindir, root),
+        )
+        assert r.returncode == 0
+        assert not (tmp_path / "uv-ran").exists()
+
+    @requires_jq
+    def test_stop_hook_blocks_when_tests_fail(self, tmp_path):
+        # Sentinel present + failing suite -> exit 2 with feedback; sentinel kept.
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        sentinel = root / ".claude" / ".tests-needed"
+        sentinel.touch()
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        self._shim(bindir, "uv", 'echo "1 failed" >&2\nexit 1\n')
+        r = self._run(
+            self._command("Stop"),
+            {"stop_hook_active": False},
+            env=self._hook_env(bindir, root),
+        )
+        assert r.returncode == 2
+        assert "Tests are failing" in r.stderr
+        assert sentinel.exists()  # kept so the next turn re-checks
+
+    @requires_jq
+    def test_stop_hook_passes_and_clears_sentinel(self, tmp_path):
+        # Sentinel present + green suite -> exit 0 and the sentinel is cleared.
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        sentinel = root / ".claude" / ".tests-needed"
+        sentinel.touch()
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        self._shim(bindir, "uv", "exit 0\n")
+        r = self._run(
+            self._command("Stop"),
+            {"stop_hook_active": False},
+            env=self._hook_env(bindir, root),
+        )
+        assert r.returncode == 0
+        assert not sentinel.exists()
+
+    @requires_jq
+    @pytest.mark.parametrize(
+        ("rel", "marks"),
+        [("a.py", True), ("pyproject.toml", True), ("notes.md", False)],
+    )
+    def test_sentinel_hook_marks_testable_edits(self, tmp_path, rel, marks):
+        # The PostToolUse sentinel is what tells Stop a testable file changed this turn.
+        root = tmp_path / "proj"
+        (root / ".claude").mkdir(parents=True)
+        r = self._run(
+            self._command("PostToolUse", "tests-needed"),
+            {"tool_input": {"file_path": f"/x/{rel}"}},
+            env={**os.environ, "CLAUDE_PROJECT_DIR": str(root)},
+        )
+        assert r.returncode == 0
+        assert (root / ".claude" / ".tests-needed").exists() is marks
+
+    @requires_jq
+    def test_ruff_hook_runs_on_py_and_skips_others(self, tmp_path):
+        # .py edit -> ruff check + ruff format; non-.py edit -> uv is never invoked.
+        root = tmp_path / "proj"
+        root.mkdir()
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        log = tmp_path / "uv-args"
+        self._shim(bindir, "uv", f'echo "$@" >> "{log}"\n')
+        env = self._hook_env(bindir, root)
+        ruff = self._command("PostToolUse", "ruff")
+        assert (
+            self._run(
+                ruff, {"tool_input": {"file_path": "/x/a.py"}}, env=env
+            ).returncode
+            == 0
+        )
+        calls = log.read_text()
+        assert "ruff check" in calls and "ruff format" in calls
+        log.unlink()
+        assert (
+            self._run(
+                ruff, {"tool_input": {"file_path": "/x/a.md"}}, env=env
+            ).returncode
+            == 0
+        )
+        assert not log.exists()  # uv not called for a non-.py file
+
+    @requires_jq
+    def test_ty_hook_surfaces_errors_on_py_only(self, tmp_path):
+        # .py edit + failing type check -> exit 2 (feedback to Claude); .md -> exit 0.
+        root = tmp_path / "proj"
+        root.mkdir()
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        self._shim(bindir, "uv", 'echo "type error" >&2\nexit 1\n')
+        env = self._hook_env(bindir, root)
+        ty = self._command("PostToolUse", "ty check")
+        assert (
+            self._run(ty, {"tool_input": {"file_path": "/x/a.py"}}, env=env).returncode
+            == 2
+        )
+        assert (
+            self._run(ty, {"tool_input": {"file_path": "/x/a.md"}}, env=env).returncode
+            == 0
+        )
