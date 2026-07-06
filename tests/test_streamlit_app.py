@@ -1,6 +1,7 @@
 import dataclasses
 import inspect
 import io
+import json
 import os
 import subprocess
 import tomllib
@@ -1012,3 +1013,74 @@ class TestThemeConfig:
 
         walk(self._theme(), "theme")
         assert not unknown, f"unrecognized theme keys: {unknown}"
+
+
+class TestHooksConfig:
+    """Guard the .claude/settings.json Claude Code hooks. Like TestThemeConfig, this
+    checks a real asset (not a mock): the file must parse as JSON, every hook must be a
+    well-formed {type: "command", command} entry whose command is valid shell (checked
+    against the real interpreter with `sh -n`, mirroring the theme guard's real-key
+    check), and the three configured events must stay wired so a dropped or typo'd hook
+    fails here instead of silently no-op'ing at runtime."""
+
+    SETTINGS = Path(__file__).resolve().parent.parent / ".claude" / "settings.json"
+
+    def _hooks(self) -> dict:
+        with open(self.SETTINGS) as f:
+            return json.load(f)["hooks"]  # raises if not valid JSON / no "hooks"
+
+    def _commands_for(self, event: str) -> str:
+        # Join every command string configured under one event, for intent checks.
+        return " ".join(h["command"] for g in self._hooks()[event] for h in g["hooks"])
+
+    def test_settings_exists_and_parses(self):
+        assert self.SETTINGS.is_file()
+        assert isinstance(self._hooks(), dict)
+
+    def test_expected_events_are_wired(self):
+        # Deleting an event silently drops that automation (format/type-check on edit,
+        # the secret guard, or run-tests-on-stop), so pin the three we configured.
+        assert {"PreToolUse", "PostToolUse", "Stop"} <= set(self._hooks())
+
+    def test_every_hook_is_a_well_formed_command(self):
+        for groups in self._hooks().values():
+            assert isinstance(groups, list) and groups
+            for group in groups:
+                entries = group["hooks"]
+                assert isinstance(entries, list) and entries
+                for hook in entries:
+                    assert hook["type"] == "command"
+                    assert isinstance(hook["command"], str) and hook["command"].strip()
+
+    def test_every_command_is_valid_shell(self):
+        # Syntax-check each command against a real shell without executing it, so a
+        # broken hook (which Claude Code would silently no-op) fails the suite instead.
+        for groups in self._hooks().values():
+            for group in groups:
+                for hook in group["hooks"]:
+                    result = subprocess.run(
+                        ["sh", "-n", "-c", hook["command"]],
+                        capture_output=True,
+                        text=True,
+                    )
+                    assert result.returncode == 0, (
+                        f"invalid shell in hook: {hook['command']}\n{result.stderr}"
+                    )
+
+    def test_secret_guard_covers_env_and_lockfile(self):
+        # The PreToolUse guard must keep protecting the HF token and the lockfile.
+        guard = self._commands_for("PreToolUse")
+        assert ".env" in guard
+        assert "uv.lock" in guard
+
+    def test_edit_hooks_run_formatter_and_type_checker(self):
+        # PostToolUse on an edit must keep invoking both ruff and ty.
+        post = self._commands_for("PostToolUse")
+        assert "ruff" in post
+        assert "ty check" in post
+
+    def test_stop_hook_runs_tests_with_loop_guard(self):
+        # The Stop hook must run pytest AND guard the infinite stop->fix loop.
+        stop = self._commands_for("Stop")
+        assert "pytest" in stop
+        assert "stop_hook_active" in stop
