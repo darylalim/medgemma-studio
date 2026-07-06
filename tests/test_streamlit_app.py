@@ -1441,12 +1441,12 @@ class TestReleaseWorkflow:
 
     def test_triggers_only_on_version_tags(self):
         # The release must fire on a pushed vX.Y.Z tag and NOT on a branch push (a
-        # branch trigger would republish on every commit to main). Pin the tag filter
-        # and assert no branch push trigger sneaks in.
+        # branch trigger would republish on every commit to main). Pin the filter to
+        # EXACTLY ["v*"]: `any(startswith("v"))` would let an over-broad glob like
+        # ["v*", "*"] through, cutting a release for arbitrary non-version tags.
         on = self._on(self._doc())
-        assert "tags" in on["push"], "release.yml push trigger has no tag filter"
-        assert any(str(pat).startswith("v") for pat in on["push"]["tags"]), (
-            "release.yml does not fire on v* tags"
+        assert on["push"].get("tags") == ["v*"], (
+            "release.yml tag filter is not exactly ['v*']"
         )
         assert "branches" not in on["push"], (
             "release.yml fires on branch pushes — it would republish on every commit"
@@ -1462,13 +1462,16 @@ class TestReleaseWorkflow:
         # The release-time drift guard: the workflow reads pyproject.toml, compares it
         # to the pushed tag, and FAILS the job on a mismatch — so a v0.7.6 tag pushed
         # while pyproject still says 0.7.5 aborts instead of publishing a release whose
-        # number lies about the code. Pin all three moves; naming the file alone is too
-        # weak (a step that reads pyproject but drops the comparison would still pass).
+        # number lies about the code. Assert on the compare's `v$version` construct,
+        # not `$TAG`: `$TAG` also appears in the publish step, so asserting it would
+        # pass even if the verify step dropped its tag-vs-version comparison entirely.
         cmds = self._run_commands(self._doc())
         assert "pyproject.toml" in cmds, (
             "release.yml never reads pyproject.toml to verify the tag"
         )
-        assert "$TAG" in cmds, "release.yml never compares against the pushed tag"
+        assert "v$version" in cmds, (
+            "release.yml never compares the tag against the pyproject version"
+        )
         assert "exit 1" in cmds, (
             "release.yml never fails the job on a tag/version mismatch"
         )
@@ -1493,17 +1496,17 @@ class TestReleaseWorkflow:
 
     def test_tag_reaches_shell_via_env(self):
         # The positive half of the injection guard: the tag is not merely kept OUT of
-        # the run commands, it is routed IN through env (the safe channel). Pin that so
-        # a refactor can't drop the env wiring — leaving the verify/publish steps with a
-        # $TAG that's never set — or drift back toward inline interpolation.
-        env_values = "\n".join(
-            str(v)
-            for step in self._steps(self._doc())
-            for v in (step.get("env") or {}).values()
-        )
-        assert "github.ref_name" in env_values, (
-            "release.yml never routes the tag (github.ref_name) through env"
-        )
+        # the run commands, it is routed IN through env (the safe channel). Check it
+        # PER STEP: every $TAG-consuming step must set `TAG: ${{ github.ref_name }}`, so
+        # dropping the env wiring from one step (leaving its $TAG unset) fails here
+        # instead of passing because another step still routes the tag.
+        consumers = [s for s in self._steps(self._doc()) if "$TAG" in s.get("run", "")]
+        assert consumers, "no run step consumes $TAG — the tag is never used"
+        for step in consumers:
+            assert (step.get("env") or {}).get("TAG") == "${{ github.ref_name }}", (
+                f"step {step.get('name')!r} uses $TAG but never wires it "
+                "from github.ref_name via env"
+            )
 
     def test_no_gate_neutralizes_itself(self):
         # A stray `continue-on-error: true` would let the version-mismatch check pass
