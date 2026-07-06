@@ -70,6 +70,14 @@ DEFAULT_INSTRUCTION_WSI = (
     "image. Describe the salient histologic findings across the patches."
 )
 
+# Persistent st.warning shown above the tabs on every view. App users never see the
+# README, so this mirrors its research-only / not-a-medical-device Disclaimer in-app.
+DISCLAIMER_TEXT = (
+    "**Research and educational use only — not a medical device.** "
+    "Outputs are AI-generated, may be inaccurate, and are not medical advice. "
+    "Always consult a qualified healthcare professional."
+)
+
 
 @st.cache_resource
 def load_model():
@@ -1124,6 +1132,7 @@ def render_wsi_tab(model, processor, config):
 
 def main():
     st.title("MedGemma Studio")
+    st.warning(DISCLAIMER_TEXT, icon=":material/warning:")
     with st.spinner("Loading model..."):
         model, processor, config = load_model()
     tab_ask, tab_cxr, tab_ct, tab_wsi = st.tabs(

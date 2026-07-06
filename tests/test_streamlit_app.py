@@ -1498,6 +1498,7 @@ class TestClaudeMd:
             "CT_WINDOWS",
             "LOCALIZATION_INSTRUCTION",
             "REPETITION_PENALTY",
+            "DISCLAIMER_TEXT",
         ]
         for name in spine:
             assert name in text, f"spine symbol {name} dropped from CLAUDE.md"

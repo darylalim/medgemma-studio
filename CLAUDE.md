@@ -19,7 +19,7 @@ When working with Python, invoke the relevant `/astral:<skill>` (`/astral:uv`, `
 
 ## Architecture
 
-`main()` loads the model once (`@st.cache_resource load_model()` → `mlx_vlm.load()` + `load_config()` → `(model, processor, config)`; model `mlx-community/medgemma-1.5-4b-it-bf16`) and renders four `st.tabs`, each delegating to a `@st.fragment`-decorated `render_*_tab` with its own keyed widgets:
+`main()` loads the model once (`@st.cache_resource load_model()` → `mlx_vlm.load()` + `load_config()` → `(model, processor, config)`; model `mlx-community/medgemma-1.5-4b-it-bf16`) and renders a research-only safety disclaimer (`DISCLAIMER_TEXT`, a persistent `st.warning`) above four `st.tabs`, each delegating to a `@st.fragment`-decorated `render_*_tab` with its own keyed widgets:
 
 - **Ask** (`render_ask_tab`) — text-only Q&A. `DEFAULT_INSTRUCTION_TEXT`.
 - **Chest X-ray** (`render_cxr_tab`) — single image; two-image **comparison** (both in one prompt labeled "First/Second image:", previewed in `st.columns(2)`, `DEFAULT_INSTRUCTION_COMPARE`, 600-token budget); or anatomy **localization** (single image only — padded to square, `LOCALIZATION_INSTRUCTION` asks for `[y0,x0,y1,x1]` boxes normalized to `[0,1000]`, then parsed → scaled → drawn → cropped back). Comparison and localization are mutually exclusive.

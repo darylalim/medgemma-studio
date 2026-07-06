@@ -165,6 +165,21 @@ def test_title_renders(app):
     assert app.title[0].value == "MedGemma Studio"
 
 
+def test_in_app_disclaimer_renders(app):
+    # Safety-critical: a research-only / not-a-medical-device notice must be visible in
+    # the app itself, not only in the README (app users never see the README). Guard it
+    # from silent removal, mirroring TestLicense's README-disclaimer guard.
+    import streamlit_app
+
+    warnings = [w.value for w in app.warning]
+    assert streamlit_app.DISCLAIMER_TEXT in warnings, (
+        "in-app research-only disclaimer is missing from the top of the app"
+    )
+    low = streamlit_app.DISCLAIMER_TEXT.lower()
+    assert "not a medical device" in low
+    assert "not medical advice" in low
+
+
 def test_four_tabs_render(app):
     # Tab labels carry inline Material Symbol icons; AppTest reports the raw label
     # markup (the :material/...: token), not the rendered glyph.
@@ -589,7 +604,8 @@ def test_cxr_localization_renders_full_frame_box(patched_mlx, png_bytes):
     markdowns = [m.value for m in at.markdown]
     assert "### Detected structures" in markdowns
     assert any("femur" in m for m in markdowns)
-    assert not at.warning
+    # (the persistent disclaimer warning is expected; the no-boxes fallback is not)
+    assert "No bounding boxes were returned." not in [w.value for w in at.warning]
 
 
 def test_cxr_comparison_passes_both_images(patched_mlx, monkeypatch, png_bytes):
@@ -738,7 +754,8 @@ def test_cxr_stale_localization_toggle_runs_comparison_with_two_images(
     markdowns = [m.value for m in at.markdown]
     assert "### Detected structures" not in markdowns  # localization branch not taken
     assert "### Response" in markdowns
-    assert not at.warning
+    # (the persistent disclaimer warning is expected; the no-boxes fallback is not)
+    assert "No bounding boxes were returned." not in [w.value for w in at.warning]
 
 
 def test_cxr_comparison_sends_unpadded_images(patched_mlx, monkeypatch):
