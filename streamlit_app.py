@@ -578,14 +578,17 @@ st.set_page_config(
 def run_model(model, processor, config, messages, images, max_new_tokens):
     """Stream generation live and return the full accumulated response text.
 
-    Tokens are streamed via ``mlx_vlm.stream_generate`` into an ``st.write_stream``
-    placeholder — on a slow local model this turns a blank wait into visibly
-    arriving text — then the placeholder is cleared so the caller's persisted-render
-    block (``render_thought`` / ``show_response`` / the localization annotation) is
-    the single, clean final render. ``generate`` is itself just ``text += chunk.text``
+    Tokens are streamed via ``mlx_vlm.stream_generate`` through ``st.write_stream``
+    — on a slow local model this turns a blank wait into visibly arriving text. The
+    caller stores the returned string and immediately ``st.rerun()``s, so the streamed
+    output is replaced by the clean persisted render (``render_thought`` / the
+    localization annotation) rather than duplicated beneath it. (An earlier attempt to
+    clear an ``st.empty()`` placeholder in a ``finally`` was unreliable inside
+    ``st.tabs`` + ``st.fragment`` — the emptied slot still rendered — so the run is
+    discarded by a rerun instead.) ``generate`` is itself just ``text += chunk.text``
     over ``stream_generate``, so the returned string is identical; determinism
     (``temperature=0`` + the repetition penalties) is preserved. Returns ``None`` on
-    failure after showing an error, so callers can bail out.
+    failure after showing an error, so callers bail out.
     """
     image_for_model = images or None
     num_images = len(images)
@@ -612,18 +615,15 @@ def run_model(model, processor, config, messages, images, max_new_tokens):
             # mislabels them as str, so the .text access needs a suppression.
             yield chunk.text  # ty: ignore[unresolved-attribute]
 
-    placeholder = st.empty()
     try:
-        # write_stream consumes the generator and returns the concatenated string;
-        # the thinking sentinels flash briefly here but are cleaned up on the
-        # persisted render below via parse_response / render_thought.
-        return placeholder.write_stream(_deltas())
+        # write_stream renders the tokens live and returns the concatenated string.
+        # The streamed output (incl. thinking sentinels / raw localization JSON) is
+        # replaced by the caller's clean persisted render on the st.rerun() it issues
+        # after storing this return value.
+        return st.write_stream(_deltas())
     except Exception as e:
         st.error(f"Inference failed: {e}", icon=":material/error:")
         return None
-    finally:
-        # Clear the live stream so the persisted-render block isn't rendered twice.
-        placeholder.empty()
 
 
 def render_thought(raw_response: str, is_thinking: bool) -> str:
@@ -718,16 +718,21 @@ def render_ask_tab(model, processor, config):
         )
         messages = build_messages(prompt, full_instruction)
         raw = run_model(model, processor, config, messages, [], max_new_tokens)
-        # Persist the run so it survives later reruns: editing any widget reruns
-        # the script and the Run button returns False, which would otherwise wipe
-        # the answer. Inference stays inside the button block; the render below
-        # reads from session_state on every rerun. The stored ``sig`` (the prompt)
-        # lets the render drop the result once the question changes.
-        st.session_state["ask_result"] = (
-            None
-            if raw is None
-            else {"raw": raw, "is_thinking": is_thinking, "sig": prompt}
-        )
+        # Persist the run so it survives later reruns: editing any widget reruns the
+        # script and the Run button returns False, which would otherwise wipe the
+        # answer. The render below reads from session_state on every rerun; the stored
+        # ``sig`` (the prompt) lets it drop the result once the question changes. On
+        # success, st.rerun() so the just-streamed raw text is discarded and only the
+        # clean persisted render shows (no duplicate). On failure the error stays put.
+        if raw is None:
+            st.session_state["ask_result"] = None
+        else:
+            st.session_state["ask_result"] = {
+                "raw": raw,
+                "is_thinking": is_thinking,
+                "sig": prompt,
+            }
+            st.rerun()
 
     result = fresh_result_or_hint("ask_result", prompt)
     if result is not None:
@@ -838,33 +843,36 @@ def render_cxr_tab(model, processor, config):
         )
         # Persist the finished run (see render_ask_tab). For localization, parse the
         # boxes and draw the annotation once here — strip any thinking trace with
-        # parse_response so the expander is rendered only in the block below.
+        # parse_response so the expander is rendered only in the block below. On
+        # success st.rerun() so the streamed raw text is replaced by the clean render.
         if raw is None:
             st.session_state["cxr_result"] = None
-        elif localize:
-            _, answer = parse_response(raw, is_thinking)
-            boxes = parse_boxes(answer)
-            annotated = None
-            if boxes and localize_size is not None:
-                width, height = localize_size
-                annotated = draw_boxes(model_images[0], boxes).crop(
-                    (0, 0, width, height)
-                )
-            st.session_state["cxr_result"] = {
-                "mode": "localize",
-                "raw": raw,
-                "is_thinking": is_thinking,
-                "annotated": annotated,
-                "boxes": boxes,
-                "sig": cxr_sig,
-            }
         else:
-            st.session_state["cxr_result"] = {
-                "mode": "text",
-                "raw": raw,
-                "is_thinking": is_thinking,
-                "sig": cxr_sig,
-            }
+            if localize:
+                _, answer = parse_response(raw, is_thinking)
+                boxes = parse_boxes(answer)
+                annotated = None
+                if boxes and localize_size is not None:
+                    width, height = localize_size
+                    annotated = draw_boxes(model_images[0], boxes).crop(
+                        (0, 0, width, height)
+                    )
+                st.session_state["cxr_result"] = {
+                    "mode": "localize",
+                    "raw": raw,
+                    "is_thinking": is_thinking,
+                    "annotated": annotated,
+                    "boxes": boxes,
+                    "sig": cxr_sig,
+                }
+            else:
+                st.session_state["cxr_result"] = {
+                    "mode": "text",
+                    "raw": raw,
+                    "is_thinking": is_thinking,
+                    "sig": cxr_sig,
+                }
+            st.rerun()
 
     result = fresh_result_or_hint("cxr_result", cxr_sig)
     if result is None:
@@ -979,6 +987,9 @@ def render_ct_tab(model, processor, config):
                     "is_thinking": is_thinking,
                     "sig": ct_sig,
                 }
+                # Discard the streamed run so only the clean render (preview +
+                # response) shows; the status was live feedback during this run.
+                st.rerun()
 
     result = fresh_result_or_hint("ct_result", ct_sig)
     if result is None:
@@ -1094,6 +1105,9 @@ def render_wsi_tab(model, processor, config):
                     "is_thinking": is_thinking,
                     "sig": wsi_sig,
                 }
+                # Discard the streamed run so only the clean render (overlay + sample
+                # patch + response) shows; the status was live feedback this run.
+                st.rerun()
 
     result = fresh_result_or_hint("wsi_result", wsi_sig)
     if result is None:

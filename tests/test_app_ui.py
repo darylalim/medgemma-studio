@@ -269,6 +269,23 @@ def test_ask_streams_deltas_and_renders_answer_once(patched_mlx, monkeypatch):
     assert sum(m == "No acute findings." for m in markdowns) == 1  # rendered once
 
 
+def test_ask_empty_generation_renders_without_crashing(patched_mlx, monkeypatch):
+    # A model that emits zero tokens (immediate EOS) must degrade gracefully:
+    # st.write_stream returns "" and the persisted render shows an empty answer under
+    # "### Response" — not a crash and not an "Inference failed" error.
+    def _empty_stream(*a, **k):
+        return
+        yield  # unreachable — the yield only makes this a zero-chunk generator
+
+    monkeypatch.setattr("mlx_vlm.stream_generate", _empty_stream)
+    at = AppTest.from_file(APP_PATH).run()
+    at.text_input(key="ask_prompt").set_value("hi").run()
+    at.button(key="ask_run").click().run()
+    assert not at.exception
+    assert "### Response" in [m.value for m in at.markdown]  # answer section renders
+    assert not at.error  # empty output is benign, not an error
+
+
 def test_ask_thinking_trace_renders(patched_mlx):
     patched_mlx.text = "<unused94>thought\nLet me reason.<unused95>Final answer."
     at = AppTest.from_file(APP_PATH).run()
@@ -892,8 +909,9 @@ def test_ct_inference_passes_windowed_slices(patched_mlx, monkeypatch):
     assert captured["gen_kwargs"]["repetition_penalty"] == REPETITION_PENALTY
     assert captured["gen_kwargs"]["repetition_context_size"] == REPETITION_CONTEXT_SIZE
     assert "Two contiguous slices of the liver." in [m.value for m in at.markdown]
-    # The staged st.status wraps the whole CT pipeline and resolves to complete.
-    assert at.status[0].state == "complete"
+    # (On success the run st.rerun()s to shed the streamed duplicate, which also
+    # discards the transient preprocessing st.status — the error-path status is
+    # asserted in test_ct_invalid_dicom_shows_error, which does not rerun.)
 
 
 def test_ct_labels_slices_in_prompt(patched_mlx, monkeypatch):
@@ -1104,8 +1122,9 @@ def test_wsi_inference_passes_patches(patched_mlx, patched_openslide, monkeypatc
     assert captured["gen_kwargs"]["repetition_penalty"] == REPETITION_PENALTY
     assert captured["gen_kwargs"]["repetition_context_size"] == REPETITION_CONTEXT_SIZE
     assert "Moderately differentiated adenocarcinoma." in [m.value for m in at.markdown]
-    # The staged st.status wraps the whole WSI pipeline and resolves to complete.
-    assert at.status[0].state == "complete"
+    # (On success the run st.rerun()s to shed the streamed duplicate, which also
+    # discards the transient preprocessing st.status — the error-path status is
+    # asserted in test_wsi_no_tissue_shows_error, which does not rerun.)
 
 
 def test_wsi_labels_patches_in_prompt(patched_mlx, patched_openslide, monkeypatch):
