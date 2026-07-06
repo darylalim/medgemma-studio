@@ -1409,7 +1409,9 @@ class TestClaudeMd:
     from the app's spine must still resolve in streamlit_app. A rename/move/delete that
     leaves the doc stale — the exact currency drift a manual audit turned up
     (tests/dicom_helpers.py existed but the Tests section never mentioned it) — fails
-    here instead of silently misleading the next session."""
+    here instead of silently misleading the next session. (Facts CLAUDE.md shares with
+    README.md — model id, WSI extensions, ruff rules — are cross-checked against the
+    code by TestDocsMatchSource.)"""
 
     ROOT = Path(__file__).resolve().parent.parent
     CLAUDE_MD = ROOT / "CLAUDE.md"
@@ -1426,6 +1428,8 @@ class TestClaudeMd:
         # (a) still exist on disk, so a rename/move/delete leaving a stale reference
         # fails the exists half, and (b) actually be named in the doc, so dropping the
         # app file or a guarded config asset from the map fails the mention half.
+        import re
+
         text = self._text()
         key_paths = [
             "streamlit_app.py",
@@ -1440,18 +1444,23 @@ class TestClaudeMd:
             assert (self.ROOT / rel).is_file(), (
                 f"documented path {rel} no longer exists"
             )
-            assert rel in text, f"{rel} is no longer documented in CLAUDE.md"
+            # Require a STANDALONE reference: the (?<![\w/]) lookbehind keeps a path
+            # from being "documented" only as the tail of a longer one — so `README.md`
+            # can't be satisfied by `samples/README.md` alone (its one other mention).
+            assert re.search(rf"(?<![\w/]){re.escape(rel)}", text), (
+                f"{rel} is no longer documented in CLAUDE.md"
+            )
 
     def test_every_test_module_is_documented(self):
-        # Reverse guard over the tests/ dir (small and stable): every non-dunder .py must
-        # be named in CLAUDE.md. This is the generic form of the drift the audit caught —
-        # a test-support module (tests/dicom_helpers.py) that existed but was undocumented
-        # — so a future one can't slip in without the Tests section noting it.
+        # Reverse guard over the tests/ dir (small, stable): every non-dunder .py must
+        # be named in CLAUDE.md — the generic form of the drift the audit caught, where
+        # a test-support module (tests/dicom_helpers.py) existed but was undocumented.
+        # conftest.py is skipped: pytest plumbing, not content the doc must inventory.
         text = self._text()
         modules = sorted(
             p.name
             for p in (self.ROOT / "tests").glob("*.py")
-            if not p.name.startswith("__")
+            if not p.name.startswith("__") and p.name != "conftest.py"
         )
         undocumented = [m for m in modules if m not in text]
         assert not undocumented, (
@@ -1460,9 +1469,11 @@ class TestClaudeMd:
 
     def test_documented_spine_symbols_exist(self):
         # Every code symbol CLAUDE.md cites from the app's spine must still resolve in
-        # streamlit_app, so a rename that isn't mirrored into the doc fails here. Curated
-        # (not scraped from prose) to stay robust: the model/inference path, the four tab
-        # renderers, the persistence helper, and the fixed-config constants.
+        # streamlit_app, so a rename not mirrored into the doc fails here. Curated (not
+        # scraped from prose) to stay robust: the model/inference path, the four tab
+        # renderers, the persistence helper, and the fixed-config constants. This is
+        # a deliberate manual sample, not exhaustive — extend it when CLAUDE.md leans
+        # on a new load-bearing symbol worth protecting from a silent rename.
         import streamlit_app
 
         text = self._text()
@@ -1492,3 +1503,59 @@ class TestClaudeMd:
             assert hasattr(streamlit_app, name), (
                 f"CLAUDE.md documents {name}, but it no longer exists in streamlit_app"
             )
+
+
+class TestDocsMatchSource:
+    """Guard the prose docs (CLAUDE.md AND README.md) against the code for the facts
+    with a single source of truth: the model id, the accepted WSI extensions, and the
+    ruff rule set. Each is checked in every doc, so a code change not mirrored into the
+    prose (or a doc that drifts from the code) fails here. This is the generalized fix
+    for a real gap — README listed `.tiff` but not the `.tif` that WSI_TYPES accepts,
+    and nothing caught it — so both docs stay pinned to the source, not each other."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def _docs(self) -> list[tuple[str, str]]:
+        return [
+            (name, (self.ROOT / name).read_text(encoding="utf-8"))
+            for name in ("CLAUDE.md", "README.md")
+        ]
+
+    def test_model_id_matches_source(self):
+        # The model repo id lives in streamlit_app.MODEL_ID; both docs cite it verbatim,
+        # so a model swap not mirrored into the prose fails here. MODEL_ID is a long,
+        # unique string, so a plain membership check is unambiguous.
+        import streamlit_app
+
+        for name, doc in self._docs():
+            assert streamlit_app.MODEL_ID in doc, (
+                f"{name} does not document MODEL_ID {streamlit_app.MODEL_ID!r}"
+            )
+
+    def test_wsi_extensions_match_source(self):
+        # Every accepted WSI extension (streamlit_app.WSI_TYPES) must appear in both
+        # docs, matched as a DELIMITED token — `\.ext` not followed by an alphanumeric —
+        # because `.tif` is a prefix of `.tiff`. A bare substring check is blind to the
+        # gap that shipped once: a doc "contains" `.tif` via `.tiff` while omitting it.
+        import re
+
+        import streamlit_app
+
+        for name, doc in self._docs():
+            missing = [
+                ext
+                for ext in streamlit_app.WSI_TYPES
+                if not re.search(rf"\.{re.escape(ext)}(?![A-Za-z0-9])", doc)
+            ]
+            assert not missing, f"{name} does not document WSI extensions {missing}"
+
+    def test_ruff_rule_set_matches_pyproject(self):
+        # pyproject's [tool.ruff.lint].select is the source of truth; both docs list it.
+        # Codes are matched backtick-wrapped (`E`, `UP`, …) because bare letters like
+        # E/F/I/B occur constantly in prose — an unbounded check would pass on any
+        # sentence. A rule in pyproject but not the docs (or vice versa) fails here.
+        with open(self.ROOT / "pyproject.toml", "rb") as f:
+            select = tomllib.load(f)["tool"]["ruff"]["lint"]["select"]
+        for name, doc in self._docs():
+            missing = [code for code in select if f"`{code}`" not in doc]
+            assert not missing, f"{name} does not document ruff rules {missing}"
