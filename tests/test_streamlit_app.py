@@ -1399,3 +1399,96 @@ class TestCiWorkflow:
                 assert step.get("continue-on-error") is not True, (
                     f"job {name}: step {step.get('name')!r} is non-blocking"
                 )
+
+
+class TestClaudeMd:
+    """Guard CLAUDE.md, the project context file loaded into every session. Like
+    TestThemeConfig/TestHooksConfig/TestCiWorkflow, this checks a real checked-in asset
+    (not a mock): the load-bearing files it maps must still exist AND stay named in the
+    doc, every test-support module must stay documented, and every code symbol it cites
+    from the app's spine must still resolve in streamlit_app. A rename/move/delete that
+    leaves the doc stale — the exact currency drift a manual audit turned up
+    (tests/dicom_helpers.py existed but the Tests section never mentioned it) — fails
+    here instead of silently misleading the next session."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+    CLAUDE_MD = ROOT / "CLAUDE.md"
+
+    def _text(self) -> str:
+        return self.CLAUDE_MD.read_text(encoding="utf-8")
+
+    def test_claude_md_exists_and_is_nonempty(self):
+        assert self.CLAUDE_MD.is_file()
+        assert self._text().strip(), "CLAUDE.md is empty"
+
+    def test_key_paths_exist_and_are_documented(self):
+        # Two-way currency guard for the load-bearing files CLAUDE.md maps: each must
+        # (a) still exist on disk, so a rename/move/delete leaving a stale reference
+        # fails the exists half, and (b) actually be named in the doc, so dropping the
+        # app file or a guarded config asset from the map fails the mention half.
+        text = self._text()
+        key_paths = [
+            "streamlit_app.py",
+            ".claude/settings.json",
+            ".github/workflows/ci.yml",
+            ".streamlit/config.toml",
+            "pyproject.toml",
+            "uv.lock",
+            "README.md",
+        ]
+        for rel in key_paths:
+            assert (self.ROOT / rel).is_file(), (
+                f"documented path {rel} no longer exists"
+            )
+            assert rel in text, f"{rel} is no longer documented in CLAUDE.md"
+
+    def test_every_test_module_is_documented(self):
+        # Reverse guard over the tests/ dir (small and stable): every non-dunder .py must
+        # be named in CLAUDE.md. This is the generic form of the drift the audit caught —
+        # a test-support module (tests/dicom_helpers.py) that existed but was undocumented
+        # — so a future one can't slip in without the Tests section noting it.
+        text = self._text()
+        modules = sorted(
+            p.name
+            for p in (self.ROOT / "tests").glob("*.py")
+            if not p.name.startswith("__")
+        )
+        undocumented = [m for m in modules if m not in text]
+        assert not undocumented, (
+            f"tests/ modules missing from CLAUDE.md: {undocumented}"
+        )
+
+    def test_documented_spine_symbols_exist(self):
+        # Every code symbol CLAUDE.md cites from the app's spine must still resolve in
+        # streamlit_app, so a rename that isn't mirrored into the doc fails here. Curated
+        # (not scraped from prose) to stay robust: the model/inference path, the four tab
+        # renderers, the persistence helper, and the fixed-config constants.
+        import streamlit_app
+
+        text = self._text()
+        spine = [
+            "load_model",
+            "build_messages",
+            "get_generation_params",
+            "run_model",
+            "load_ct_volume",
+            "window_ct_slice",
+            "load_wsi_patches",
+            "ram_aware_slice_cap",
+            "parse_response",
+            "parse_boxes",
+            "fresh_result_or_hint",
+            "tab_settings",
+            "render_ask_tab",
+            "render_cxr_tab",
+            "render_ct_tab",
+            "render_wsi_tab",
+            "CT_WINDOWS",
+            "LOCALIZATION_INSTRUCTION",
+            "REPETITION_PENALTY",
+        ]
+        for name in spine:
+            assert name in text, f"spine symbol {name} dropped from CLAUDE.md"
+            assert hasattr(streamlit_app, name), (
+                f"CLAUDE.md documents {name}, but it no longer exists in streamlit_app"
+            )
