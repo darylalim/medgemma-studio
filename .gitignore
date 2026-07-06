@@ -18,6 +18,9 @@ __pycache__/
 .ruff_cache/
 .ty_cache/
 
+# Claude Code — share hooks via .claude/settings.json; ignore personal overrides
+.claude/settings.local.json
+
 # Local test data: chest X-rays in samples/cxr/ (comparison / Locate-anatomy), a CT
 # DICOM series in samples/ct/, and a whole-slide image in samples/wsi/. Keep the
 # directory's README so the test assets stay self-describing.

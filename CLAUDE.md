@@ -17,6 +17,16 @@ uv run pytest                     # Run tests
 
 When working with Python, invoke the relevant `/astral:<skill>` (`/astral:uv`, `/astral:ty`, `/astral:ruff`) to ensure best practices are followed.
 
+## Claude Code hooks
+
+`.claude/settings.json` (checked in, shared) wires the commands above into hooks so the same gates run automatically:
+
+- **PreToolUse** (`Edit`/`Write`) — blocks writes to `.env`, `.streamlit/secrets.toml`, and `uv.lock` (protects the `HF_TOKEN` and keeps the lockfile package-manager-only).
+- **PostToolUse** (`Edit`/`Write`) — on an edited `.py` file, runs `ruff check --fix` + `ruff format` (silent), then `ty check` (surfaces type errors back to Claude to fix).
+- **Stop** — runs `uv run pytest` when a turn ends; failures block the stop and are fed back, guarded against an infinite stop→fix loop via `stop_hook_active`.
+
+Personal overrides belong in `.claude/settings.local.json` (gitignored). The shared config is guarded by `TestHooksConfig` (see Tests).
+
 ## Architecture
 
 Single-file app (`streamlit_app.py`) with the following structure:
