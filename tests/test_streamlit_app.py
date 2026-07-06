@@ -1459,20 +1459,28 @@ class TestReleaseWorkflow:
         assert self._doc().get("permissions") == {"contents": "write"}
 
     def test_verifies_tag_matches_pyproject_version(self):
-        # The release-time drift guard: the workflow reads pyproject.toml and compares
-        # it to the tag, so a v0.7.6 tag pushed while pyproject still says 0.7.5 fails
-        # the job instead of publishing a release whose number lies about the code.
+        # The release-time drift guard: the workflow reads pyproject.toml, compares it
+        # to the pushed tag, and FAILS the job on a mismatch — so a v0.7.6 tag pushed
+        # while pyproject still says 0.7.5 aborts instead of publishing a release whose
+        # number lies about the code. Pin all three moves; naming the file alone is too
+        # weak (a step that reads pyproject but drops the comparison would still pass).
         cmds = self._run_commands(self._doc())
         assert "pyproject.toml" in cmds, (
             "release.yml never reads pyproject.toml to verify the tag"
         )
+        assert "$TAG" in cmds, "release.yml never compares against the pushed tag"
+        assert "exit 1" in cmds, (
+            "release.yml never fails the job on a tag/version mismatch"
+        )
 
     def test_creates_release_with_generated_notes(self):
-        # The publish step itself: `gh release create` with auto-generated notes, so the
-        # notes come from the commit history (no hand-maintained CHANGELOG to drift).
+        # The publish step itself: `gh release create` with auto-generated notes (from
+        # the commit history — no hand-maintained CHANGELOG to drift) and --verify-tag,
+        # which refuses to publish against a tag that isn't actually on the remote.
         cmds = self._run_commands(self._doc())
         assert "gh release create" in cmds
         assert "--generate-notes" in cmds
+        assert "--verify-tag" in cmds
 
     def test_no_expression_flows_into_a_run_step(self):
         # Same injection guard as CI: a ${{ }} expression interpolated into a shell
@@ -1482,6 +1490,20 @@ class TestReleaseWorkflow:
             s["run"] for s in self._steps(self._doc()) if "${{" in s.get("run", "")
         ]
         assert not offenders, f"expression flows into run step(s): {offenders}"
+
+    def test_tag_reaches_shell_via_env(self):
+        # The positive half of the injection guard: the tag is not merely kept OUT of
+        # the run commands, it is routed IN through env (the safe channel). Pin that so
+        # a refactor can't drop the env wiring — leaving the verify/publish steps with a
+        # $TAG that's never set — or drift back toward inline interpolation.
+        env_values = "\n".join(
+            str(v)
+            for step in self._steps(self._doc())
+            for v in (step.get("env") or {}).values()
+        )
+        assert "github.ref_name" in env_values, (
+            "release.yml never routes the tag (github.ref_name) through env"
+        )
 
     def test_no_gate_neutralizes_itself(self):
         # A stray `continue-on-error: true` would let the version-mismatch check pass
