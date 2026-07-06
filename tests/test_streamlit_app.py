@@ -1302,3 +1302,79 @@ class TestHooksConfig:
             self._run(ty, {"tool_input": {"file_path": "/x/a.md"}}, env=env).returncode
             == 0
         )
+
+
+class TestCiWorkflow:
+    """Guard the .github/workflows/ci.yml GitHub Actions workflow. Like TestThemeConfig
+    and TestHooksConfig, this checks a real checked-in asset (not a mock): the file must
+    parse as YAML, run every job on an Apple-Silicon (macOS/arm64) runner matching the
+    MLX target, and drive the SAME four gates the local hooks enforce (ruff check, ruff
+    format --check, ty check, pytest) via a locked `uv sync`. It also pins the security
+    property that no workflow expression reaches a shell `run:` step, so a future edit
+    that introduces a command-injection sink fails here instead of shipping."""
+
+    WORKFLOW = (
+        Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
+    )
+
+    def _doc(self) -> dict:
+        # Imported inside the test (like the mlx-vlm contract guards) so a missing dep
+        # or moved path fails only this check, not collection of the whole suite.
+        import yaml
+
+        with open(self.WORKFLOW) as f:
+            return yaml.safe_load(f)  # raises if not valid YAML
+
+    def _on(self, doc: dict) -> dict:
+        # PyYAML parses the bare `on:` key as the boolean True (YAML 1.1), so look it up
+        # under both spellings rather than assuming a "on" string key.
+        return doc.get("on", doc.get(True))
+
+    def _steps(self, doc: dict) -> list[dict]:
+        return [step for job in doc["jobs"].values() for step in job["steps"]]
+
+    def _run_commands(self, doc: dict) -> str:
+        return "\n".join(s["run"] for s in self._steps(doc) if "run" in s)
+
+    def test_workflow_exists_and_parses(self):
+        assert self.WORKFLOW.is_file()
+        assert isinstance(self._doc(), dict)
+
+    def test_triggers_on_push_main_pr_and_dispatch(self):
+        # Dropping any of these silently narrows when CI runs (no PR gating, no manual
+        # re-run), so pin the three triggers and the main-branch push filter.
+        on = self._on(self._doc())
+        assert {"push", "pull_request", "workflow_dispatch"} <= set(on)
+        assert "main" in on["push"]["branches"]
+
+    def test_runs_on_apple_silicon_runner(self):
+        # The app is Apple-Silicon + MLX; every job must run on a macOS (arm64)
+        # runner so CI matches dev/prod and the real-mlx-vlm contract test exercises
+        # the shipped backend. A stray ubuntu runner would test a different platform.
+        for name, job in self._doc()["jobs"].items():
+            assert str(job["runs-on"]).startswith("macos"), (
+                f"job {name!r} runs on {job['runs-on']!r}, not a macOS runner"
+            )
+
+    def test_runs_the_same_four_gates_as_local_hooks(self):
+        # CI must enforce exactly the gates the .claude hooks run locally, so a
+        # contributor without the hooks can't merge a lint/format/type/test regression.
+        cmds = self._run_commands(self._doc())
+        assert "ruff check" in cmds
+        assert "ruff format --check" in cmds  # verify formatting; never reformat in CI
+        assert "ty check" in cmds
+        assert "pytest" in cmds
+
+    def test_dependency_install_is_locked(self):
+        # `uv sync --locked` both installs deps and fails if uv.lock drifts from
+        # pyproject.toml — the reproducible-install + lockfile-drift guard in one step.
+        assert "uv sync --locked" in self._run_commands(self._doc())
+
+    def test_no_expression_flows_into_a_run_step(self):
+        # Injection guard: a ${{ }} expression interpolated into a shell `run:` block is
+        # the classic GitHub Actions command-injection sink. Expressions are fine in
+        # non-run contexts (e.g. concurrency.group), but none may reach a run command.
+        offenders = [
+            s["run"] for s in self._steps(self._doc()) if "${{" in s.get("run", "")
+        ]
+        assert not offenders, f"expression flows into run step(s): {offenders}"
