@@ -1378,3 +1378,24 @@ class TestCiWorkflow:
             s["run"] for s in self._steps(self._doc()) if "${{" in s.get("run", "")
         ]
         assert not offenders, f"expression flows into run step(s): {offenders}"
+
+    def test_token_is_least_privilege(self):
+        # CI only reads code and runs tests — it never pushes, comments, or releases,
+        # so GITHUB_TOKEN is pinned read-only; dropping it would let a compromised dep
+        # escalate via a write-scoped token (same threat model as the injection guard).
+        assert self._doc().get("permissions") == {"contents": "read"}
+
+    def test_no_gate_neutralizes_itself(self):
+        # The tests above prove each gate is PRESENT; this proves none opts out of
+        # blocking. A stray `continue-on-error: true` (silence a flaky test and forget)
+        # keeps those substrings green while the badge goes advisory — CI passing on a
+        # red suite. Conditional `if:` steps are legitimate, so only the non-blocking
+        # opt-out is banned, at job and step scope.
+        for name, job in self._doc()["jobs"].items():
+            assert job.get("continue-on-error") is not True, (
+                f"job {name} is non-blocking"
+            )
+            for step in job["steps"]:
+                assert step.get("continue-on-error") is not True, (
+                    f"job {name}: step {step.get('name')!r} is non-blocking"
+                )

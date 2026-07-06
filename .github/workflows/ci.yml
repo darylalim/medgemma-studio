@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read             # CI reads code, pushes nothing — least privilege
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -13,6 +16,7 @@ concurrency:
 jobs:
   check:
     runs-on: macos-15          # Apple Silicon (arm64) — matches dev + prod
+    timeout-minutes: 15        # ~11s suite; cap a hung uv sync / pytest at minutes, not 6h
     steps:
       - uses: actions/checkout@v5
 
