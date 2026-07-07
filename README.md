@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/darylalim/medgemma-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/darylalim/medgemma-studio/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/darylalim/medgemma-studio)](https://github.com/darylalim/medgemma-studio/releases) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Streamlit application for analyzing medical text and images using Google [MedGemma](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) on Apple Silicon with MLX.
+Streamlit application for analyzing medical text and images using Google [MedGemma](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16) on Apple Silicon with MLX. Inference runs entirely on-device — no image, scan, or slide ever leaves your Mac.
+
+![MedGemma Studio's Chest X-ray tab: an uploaded chest radiograph with the model's generated, streaming radiology-style findings shown below (research use only).](docs/screenshot.png)
 
 ## Disclaimer
 
@@ -32,8 +34,10 @@ Requires:
 - Mac with Apple Silicon
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
+- **16 GB unified memory** minimum (comfortable for the Ask and Chest X-ray tabs); **32 GB or more recommended** for the Computed Tomography and Pathology tabs, whose multi-image inference is memory-heavy — the app automatically caps how many CT slices / WSI patches it analyzes to fit your RAM
+- **~9 GB free disk** for the model weights
 
-The model ([`mlx-community/medgemma-1.5-4b-it-bf16`](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16)) downloads from Hugging Face on first run. The repo is ungated, so no token is required.
+The model ([`mlx-community/medgemma-1.5-4b-it-bf16`](https://huggingface.co/mlx-community/medgemma-1.5-4b-it-bf16), ~9 GB) downloads from Hugging Face on first run. The repo is ungated, so no token is required. Whole-slide pathology support needs no extra setup — OpenSlide's native library ships as a prebuilt Apple Silicon wheel (no Homebrew).
 
 ```bash
 uv sync
@@ -57,6 +61,10 @@ The app opens with four tabs:
 - **Chest X-ray** — upload an image and run for analysis. To **locate anatomy**, enable the toggle and ask e.g. *"Where is the right clavicle?"*; the app draws labeled bounding boxes (this mode uses a built-in prompt and ignores the system instruction). To **compare** two studies, upload a first image, then a second in the slot that appears — the two are previewed side by side and the app sends both in one prompt and describes the changes. (Localization is single-image only and is disabled with two images.)
 - **Computed Tomography** — upload a CT series as individual DICOM (`.dcm`) slice files (multi-select), choose how many slices to analyze, enter a question, and run. Each slice is windowed into a false-color image before analysis.
 - **Pathology (WSI)** — upload a whole-slide image (`.svs`/`.ndpi`/`.tif`/`.tiff`), pick a magnification (5/10/20/40×) and how many tissue patches to analyze, enter a question, and run. A tissue-overview overlay (sampled patches outlined) and a sample patch are shown, with the actual magnification disclosed (clamped to the slide's available pyramid levels).
+
+## Try it with sample data
+
+No medical images on hand? [`samples/README.md`](samples/README.md) has copy-paste download commands — with source attribution — for a real longitudinal chest X-ray pair, a CT DICOM series, and a whole-slide image (the same public assets used in Google's MedGemma notebooks), plus step-by-step instructions for exercising each tab. The files are gitignored; only that guide is tracked.
 
 ## Development
 
