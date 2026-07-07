@@ -1765,7 +1765,7 @@ class TestLicense:
 
 class TestReadmeAssets:
     """Guard the README's in-repo assets and links — the hero screenshot
-    (docs/screenshot.png) and the relative links it carries (the sample-data guide, the
+    (docs/screenshot.webp) and the relative links it carries (the sample-data guide, the
     LICENSE, the CI/release workflows). Like the other checked-in-asset guards, a
     moved/renamed/deleted target must fail here rather than ship as a broken image or a
     dead link in the rendered README. External (http/mailto) links and in-page anchors
@@ -1777,20 +1777,22 @@ class TestReadmeAssets:
         return (self.ROOT / "README.md").read_text(encoding="utf-8")
 
     def _relative_targets(self) -> list[str]:
-        # Pull the target out of every Markdown inline link/image — [text](t) and
-        # ![alt](t) — then keep only repo-relative paths: drop http(s)/mailto, and strip
-        # any optional `"title"` or `#fragment` so a bare path remains.
+        # Pull the target from every Markdown `](target)` — plain links, images,
+        # and both halves of a nested badge `[![alt](img)](target)`, so a badge
+        # pointing at a repo file is validated too, not just its inner image.
+        # Keep only repo-relative paths: drop http(s)/mailto and strip any
+        # `"title"` / `#fragment`. Deduplicated — one entry per target.
         import re
 
         targets = []
-        for m in re.finditer(r"!?\[[^\]]*\]\(([^)]+)\)", self._readme()):
+        for m in re.finditer(r"\]\(([^)]+)\)", self._readme()):
             raw = m.group(1).strip()
             if not raw:
                 continue
             target = raw.split()[0].split("#", 1)[0]
             if target and not target.startswith(("http://", "https://", "mailto:")):
                 targets.append(target)
-        return targets
+        return sorted(set(targets))
 
     def test_readme_relative_links_resolve(self):
         # Every repo-relative link/image target must exist on disk: the hero image,
@@ -1800,12 +1802,15 @@ class TestReadmeAssets:
         assert not missing, f"README links to missing repo files: {missing}"
 
     def test_readme_embeds_hero_screenshot(self):
-        # Two-way guard for the hero (mirrors TestClaudeMd's exists-AND-documented): the
-        # README must embed an image under docs/ AND that file must exist, so the
-        # screenshot can't be silently dropped from the README or deleted from the repo.
+        # Two-way guard for the hero (mirrors TestClaudeMd's exists-AND-documented):
+        # the README must embed the docs/screenshot.webp hero AND that file must
+        # exist, so it can't be silently dropped from the README or deleted from the
+        # repo. Pin the exact path (not just "some docs/ image") to match the framing.
         import re
 
         heroes = re.findall(r"!\[[^\]]*\]\((docs/[^)\s]+)\)", self._readme())
-        assert heroes, "README no longer embeds a docs/ hero screenshot"
+        assert "docs/screenshot.webp" in heroes, (
+            "README no longer embeds the docs/screenshot.webp hero"
+        )
         for rel in heroes:
             assert (self.ROOT / rel).is_file(), f"hero image {rel} is missing"

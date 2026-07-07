@@ -33,7 +33,7 @@ __pycache__/
 samples/*
 !samples/README.md
 
-# README hero: docs/screenshot.png is committed; the full-page capture produced while
+# README hero: docs/screenshot.webp is committed; the full-page capture produced while
 # regenerating it (see CLAUDE.md "Screenshots") is a throwaway.
 docs/screenshot-full.png
 
