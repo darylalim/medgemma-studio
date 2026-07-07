@@ -83,6 +83,8 @@ Pushing a `vX.Y.Z` tag publishes a GitHub Release: a second workflow ([`.github/
 
 If you use [Claude Code](https://claude.com/claude-code) in this repo, `.claude/settings.json` wires the commands above into hooks: edited Python files are auto-formatted (`ruff`) and type-checked (`ty`), the test suite runs when Claude finishes a turn that touched code or config (docs/chat turns are skipped), and writes to `.env`/`.streamlit/secrets.toml`/`uv.lock` are blocked. The `.claude/settings.json` config is itself guarded by `TestHooksConfig` — as are the repo's other checked-in assets (the theme, the CI and release workflows, and this project's `CLAUDE.md`) via `TestThemeConfig` / `TestCiWorkflow` / `TestReleaseWorkflow` / `TestClaudeMd`, so a config or doc that drifts from the code fails a test.
 
+**Regenerating the screenshot.** The README hero (`docs/screenshot.png`) is a headless [Playwright](https://playwright.dev/python/) capture of the **Chest X-ray** tab analyzing the [sample radiograph](samples/README.md) — Playwright runs ephemerally (`uv run --with playwright …`), so it is **not** a project dependency. Drive the tab (attach the sample, ask a plain-analysis question, Run, wait for the response), force the browser to `color_scheme="dark"`, and use a viewport taller than the whole app so Streamlit's inner scroll doesn't clip the capture; then crop to the X-ray-plus-response region and downscale. The throwaway full-page intermediate (`docs/screenshot-full.png`) is gitignored; see `CLAUDE.md` for the exact gotchas.
+
 ## License
 
 This project's source code is licensed under the [Apache License 2.0](LICENSE) (`Apache-2.0`).

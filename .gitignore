@@ -33,6 +33,10 @@ __pycache__/
 samples/*
 !samples/README.md
 
+# README hero: docs/screenshot.png is committed; the full-page capture produced while
+# regenerating it (see CLAUDE.md "Screenshots") is a throwaway.
+docs/screenshot-full.png
+
 # Build / packaging artifacts (pyproject now declares license-files for distributables)
 build/
 dist/

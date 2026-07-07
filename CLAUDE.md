@@ -72,6 +72,15 @@ Personal overrides go in `.claude/settings.local.json` (gitignored).
 - **`tests/dicom_helpers.py`** — shared in-memory DICOM builder `dicom_bytes`, imported by **both** test files (aliased `_dicom_bytes` in `test_streamlit_app.py`); a test support module, not a test file.
 - Manual-test assets live in `samples/` (gitignored except `samples/README.md`); the suite builds its own in-memory fixtures.
 
+## Screenshots
+
+The README hero (`docs/screenshot.png`) shows the **Chest X-ray** tab analyzing the sample radiograph (`samples/cxr/longitudinal_cxr_before.png` — see `samples/README.md`). Regenerate it with headless **Playwright**, run ephemerally (`uv run --with playwright …`) so it stays **out of the project deps** — it is not a dependency:
+
+- Start the app, then drive the CXR tab: attach the sample via the `input[type="file"]`, ask a plain-analysis prompt (localization boxes are unreliable on this 4B model — don't use them for the hero), Run, and wait for the `Response`.
+- **Force `color_scheme="dark"`** (headless Chromium defaults to light; the app follows `prefers-color-scheme`) and use a **viewport taller than the whole app** — Streamlit scrolls *inside* `section[data-testid="stMain"]`, so `full_page` otherwise captures one viewport band and clips the title/response.
+- Hide the dev chrome (`stToolbar`/`stHeader`/fullscreen buttons), screenshot, then crop to the X-ray→`Response` region (element bounding boxes) and downscale to ~1200px with Pillow. The full-page intermediate (`docs/screenshot-full.png`) is a throwaway — gitignored.
+- `TestReadmeAssets` guards that the hero stays embedded and every repo-relative README link resolves.
+
 ## Gotchas
 
 - **AppTest re-execs the script each run** — patch `mlx_vlm.*` (and `openslide.OpenSlide`) at the **source**, not `streamlit_app`; select widgets **by key** (tabs render every widget, so position is ambiguous); chain multiple `.upload()` on one element before a single `.run()`.
