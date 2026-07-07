@@ -1761,3 +1761,51 @@ class TestLicense:
         assert "Health AI Developer Foundations" in readme, (
             "README no longer points to the model's HAI-DEF terms"
         )
+
+
+class TestReadmeAssets:
+    """Guard the README's in-repo assets and links — the hero screenshot
+    (docs/screenshot.png) and the relative links it carries (the sample-data guide, the
+    LICENSE, the CI/release workflows). Like the other checked-in-asset guards, a
+    moved/renamed/deleted target must fail here rather than ship as a broken image or a
+    dead link in the rendered README. External (http/mailto) links and in-page anchors
+    are out of scope; only repo-relative paths are resolved."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def _readme(self) -> str:
+        return (self.ROOT / "README.md").read_text(encoding="utf-8")
+
+    def _relative_targets(self) -> list[str]:
+        # Pull the target out of every Markdown inline link/image — [text](t) and
+        # ![alt](t) — then keep only repo-relative paths: drop http(s)/mailto, and strip
+        # any optional `"title"` or `#fragment` so a bare path remains.
+        import re
+
+        targets = []
+        for m in re.finditer(r"!?\[[^\]]*\]\(([^)]+)\)", self._readme()):
+            raw = m.group(1).strip()
+            if not raw:
+                continue
+            target = raw.split()[0].split("#", 1)[0]
+            if target and not target.startswith(("http://", "https://", "mailto:")):
+                targets.append(target)
+        return targets
+
+    def test_readme_relative_links_resolve(self):
+        # Every repo-relative link/image target must exist on disk: the hero image,
+        # samples/README.md, LICENSE, and the workflow files the Development section
+        # links all fail here if moved, renamed, or deleted.
+        missing = [t for t in self._relative_targets() if not (self.ROOT / t).exists()]
+        assert not missing, f"README links to missing repo files: {missing}"
+
+    def test_readme_embeds_hero_screenshot(self):
+        # Two-way guard for the hero (mirrors TestClaudeMd's exists-AND-documented): the
+        # README must embed an image under docs/ AND that file must exist, so the
+        # screenshot can't be silently dropped from the README or deleted from the repo.
+        import re
+
+        heroes = re.findall(r"!\[[^\]]*\]\((docs/[^)\s]+)\)", self._readme())
+        assert heroes, "README no longer embeds a docs/ hero screenshot"
+        for rel in heroes:
+            assert (self.ROOT / rel).is_file(), f"hero image {rel} is missing"
