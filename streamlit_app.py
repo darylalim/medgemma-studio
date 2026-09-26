@@ -32,8 +32,10 @@ HAI_DEF_TERMS_URL = (
 # an otherwise fully on-device app would make. A local file is served from Streamlit's
 # own /media/ endpoint instead. Resolved against __file__, not the CWD, so `streamlit
 # run` from any directory finds it. Source glyph: Material Symbols Rounded
-# `clinical_notes` (Apache-2.0), recolored to the theme's primary #88c0d0 -- the stock
-# glyph is black and all but invisible against a dark browser tab strip.
+# `clinical_notes` (Apache-2.0), recolored to a mid teal #0d8792 -- the stock glyph is
+# black and all but invisible against a dark browser tab strip. Mid, because this file
+# is also the st.logo mark on both theme modes' sidebars: it sits at the lightness
+# where its contrast against the light and the dark panel meet (~3.8:1 on each).
 FAVICON_PATH = Path(__file__).resolve().parent / "assets" / "favicon.png"
 
 IMAGE_TYPES = ["png", "jpg", "jpeg", "webp"]
@@ -1632,8 +1634,7 @@ def render_sidebar() -> None:
         )
 
         st.subheader("Model")
-        # A plain link, not a code span: linkUnderline = false in the theme, so the
-        # link color is the only cue, and inline-code styling overrode it.
+        # A plain link, not a code span: inline-code styling overrides the link color.
         st.markdown(f"[{MODEL_ID.split('/')[-1]}]({MODEL_CARD_URL})")
         st.caption(
             "Runs on this Mac through MLX: no image, scan, or slide leaves the "

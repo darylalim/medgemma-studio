@@ -37,60 +37,139 @@ gatherUsageStats = false
 [server]
 maxUploadSize = 2000
 
-# Nord theme — the arctic, north-bluish palette, applied as shipped in Streamlit's
-# bundled `nord` template (frost accents #88c0d0/#81a1c1, aurora semantics).
+# "Reading room" -- a light/dark theme pair shaped around what this app displays:
+# grayscale radiographs, false-color CT windows, and H&E-stained slides. Every value
+# was contrast-checked (WCAG 2.x) against the surface it lands on, including the
+# ones Streamlit derives (a caption's 60% opacity, a selected segment's 10% tint), and
+# TestThemeConfig re-derives the load-bearing ratios from this file.
 #
-# Deliberately a LONE [theme] block: Streamlit exposes the light/dark switch in the
-# settings menu only when BOTH [theme.light] and [theme.dark] are defined, so keeping
-# a single section locks the app to one mode and removes the toggle. `base = "dark"`
-# seeds everything not overridden below from the dark built-in.
+# - Dark is the reading mode. Radiology reading rooms keep the field around an image
+#   dark and COLORLESS: a tinted surround shifts the perceived gray of the image
+#   beside it (simultaneous contrast), and a bright one adds glare that flattens the
+#   darks. So the dark background is a neutral #16181b (the nord #2e3440 it
+#   replaced was both bluer and ~3.8x brighter), with the sidebar a step lighter so
+#   the image column stays the darkest field on screen. Light is for bright rooms and
+#   projectors: an off-white #f7f8f9 rather than #fff, the same neutrality, and the
+#   sidebar a step darker -- in both modes the panel sits one step off the canvas.
+# - A clinical TEAL accent in both modes, the complement of H&E's pink/purple, so no
+#   control is ever mistaken for stain -- and a different hue from the pure red PIL
+#   draws the localization boxes and patch outlines in.
+# - primaryColor's lightness is PINNED by the Run button: Streamlit renders primary-
+#   button labels in white directly on primaryColor (hover only darkens it), so the
+#   primary must stay dark enough for white text. Streamlit also draws TEXT in
+#   primaryColor: at rest, the selected tab label, the selected segment label (the
+#   WSI magnification control, on a 10% primary tint) and the slider's value; and
+#   transiently, a hovered/focused segment (20% tint) and the uploader's drag-over
+#   prompt (on secondaryBackgroundColor). In light mode a deep teal (#0f6d76) clears
+#   4.5:1 in every at-rest role -- white label 6.1, tab 5.7, segment 4.9 -- dipping
+#   to 4.3 only on a hovered segment. In dark mode nothing can: #13808a gives the Run
+#   label 4.7:1 but the tab label and slider value 3.8:1, the segment label 3.5:1
+#   (3.1 hovered) and the drag prompt 3.3:1 -- each still marked by an underline,
+#   outline, thumb, or the drop zone itself. The Run label won the trade. Links carry
+#   the accent as plain text through a separate linkColor tint instead.
+# - Near-black / off-white text rather than pure #000 / #fff, to limit halation.
+#   Light's #121518 is as dark as it is because Streamlit draws st.caption -- ~15
+#   of them here -- at 60% opacity, and the faded blend must clear 4.5:1 on both the
+#   canvas and the sidebar: it lands 4.7 / 4.6, about one sRGB step above the floor.
+#   Dark's captions land 5.6-5.9.
+# - The six hued semantic colors sit at one OKLCH lightness per mode (dark 0.72,
+#   light 0.55), the same hues where gamut allows, so no status shouts louder than
+#   another; amber (and, in light, orange) is lifted where it would otherwise read as
+#   mustard or brown -- see each section. Three are load-bearing: yellow tints the
+#   persistent disclaimer st.warning, red st.error, and blue the stale-result st.info
+#   and the localization legend's :blue-badge. Green/orange/violet complete the set,
+#   with a near-neutral grayColor a step off that lightness (dark 0.66, light 0.52);
+#   nothing in the app names them today. (The CT/Pathology st.status icons take none
+#   of them -- the default status style draws its spinner/check/error in the text
+#   color.)
+# - linkUnderline = true: in dark mode no link tint that clears 4.5:1 on the surfaces
+#   also clears the 3:1 against body text a color-only link cue needs, so the
+#   underline is the cue. The sidebar's Terms of Use link also sits inside an
+#   st.caption, whose 60% opacity fades the tint: dark's linkColor is a pale aqua
+#   (#82dfea) precisely so it still clears 4.5:1 faded (4.9 canvas / 4.7 sidebar).
+#   In light mode no tint short of near-black survives the fade (the link lands
+#   ~2.6:1) -- a known gap that only moving the link out of the caption fixes.
 #
-# The aurora colors are load-bearing rather than decorative: red/orange/green drive
-# st.error / st.warning and the st.status phase badges the CT and Pathology tabs
-# narrate their preprocessing with. All keys are validated against the installed
-# Streamlit by TestThemeConfig.
+# Defining EITHER [theme.light] or [theme.dark] makes Streamlit offer the System /
+# Light / Dark switch in the app menu (⋮), following the OS appearance until the
+# viewer picks. A mode whose section is missing is built from Streamlit's stock
+# palette plus the shared keys, and the switch stays -- so deleting one section
+# silently reverts that mode to stock rather than failing. Keys set in [theme] are
+# shared and each mode section overrides them, so only mode-independent settings
+# (shape, type scale, link style) live there. All keys are validated against the
+# installed Streamlit by TestThemeConfig.
 #
-# Nord's `font`/`codeFont` (Inter + JetBrains Mono, via a fonts.googleapis.com
-# stylesheet) are DELIBERATELY omitted: inference here is fully on-device, and a
-# webfont fetch would be the one outbound request the app makes on every page load.
-# Streamlit's defaults -- Source Sans / Source Code, and the Material Symbols face
-# behind every :material/icon: -- are served from the app's own static bundle, so
-# leaving these keys unset keeps rendering local. Re-adding them re-adds the fetch.
+# `font`/`codeFont` are DELIBERATELY unset: inference here is fully on-device, and a
+# webfont (the bundled templates all pull theirs from fonts.googleapis.com) would be
+# the one outbound request the app makes on every page load. Streamlit's defaults --
+# Source Sans / Source Code, and the Material Symbols face behind every
+# :material/icon: -- are served from the app's own static bundle, so leaving these
+# keys unset keeps rendering local. Setting them re-adds the fetch.
 [theme]
-base = "dark"
-primaryColor = "#88c0d0"
-backgroundColor = "#2e3440"
-secondaryBackgroundColor = "#3b4252"
-codeBackgroundColor = "#3b4252"
-textColor = "#eceff4"
-linkColor = "#81a1c1"
-borderColor = "#4c566a"
 showWidgetBorder = true
 showSidebarBorder = true
 baseRadius = "4px"
 buttonRadius = "4px"
 codeFontSize = "0.875rem"
-codeTextColor = "#d8dee9"
 baseFontSize = 14
 baseFontWeight = 400
 headingFontSizes = ["32px", "24px", "20px", "16px", "14px", "12px"]
 headingFontWeights = [600, 600, 600, 600, 600, 600]
-linkUnderline = false
-chartCategoricalColors = ["#88c0d0", "#81a1c1", "#5e81ac", "#a3be8c", "#ebcb8b", "#d08770", "#bf616a"]
+linkUnderline = true
 
-# Nord color palette (Frost + Aurora)
-blueColor = "#81a1c1"
-greenColor = "#a3be8c"
-yellowColor = "#ebcb8b"
-orangeColor = "#d08770"
-redColor = "#bf616a"
-violetColor = "#b48ead"
+# Dark: semantic colors at OKLCH L 0.72 / C 0.13, hues 25/55/80/150/250/300 -- amber
+# lifted to L 0.80 / C 0.14, where yellow otherwise reads as mustard.
+[theme.dark]
+primaryColor = "#13808a"
+backgroundColor = "#16181b"
+secondaryBackgroundColor = "#22252a"
+codeBackgroundColor = "#22252a"
+textColor = "#e4e6e9"
+codeTextColor = "#c9cdd3"
+linkColor = "#82dfea"
+borderColor = "#434850"
+redColor = "#eb827b"
+orangeColor = "#e28d4f"
+yellowColor = "#edb345"
+greenColor = "#62bb78"
+blueColor = "#60aaf3"
+violetColor = "#b191ea"
+grayColor = "#8e9398"
+chartCategoricalColors = ["#5ecad6", "#60aaf3", "#62bb78", "#edb345", "#e28d4f", "#eb827b", "#b191ea"]
 
-# Styles the app panel (render_sidebar in streamlit_app.py): one step lighter than the
-# main background -- the nord template's own surface split -- with showSidebarBorder
-# above drawing the dividing rule.
-[theme.sidebar]
-backgroundColor = "#3b4252"
-secondaryBackgroundColor = "#434c5e"
-codeBackgroundColor = "#434c5e"
-borderColor = "#4c566a"
+# The app panel (render_sidebar in streamlit_app.py), one step lighter than the
+# canvas, with showSidebarBorder above drawing the dividing rule.
+[theme.dark.sidebar]
+backgroundColor = "#1d2024"
+secondaryBackgroundColor = "#2a2e33"
+codeBackgroundColor = "#2a2e33"
+borderColor = "#434850"
+
+# Light: semantic colors at OKLCH L 0.55 / C 0.12-0.16, the dark hues except amber
+# (75, not 80 -- 80 has no in-gamut amber at this chroma); orange lifted to L 0.58
+# and amber to 0.62, where they otherwise read as brown or olive. Each >= 3:1 on the
+# canvas as a badge or icon.
+[theme.light]
+primaryColor = "#0f6d76"
+backgroundColor = "#f7f8f9"
+secondaryBackgroundColor = "#eceef1"
+codeBackgroundColor = "#eceef1"
+textColor = "#121518"
+codeTextColor = "#2e343b"
+linkColor = "#086a73"
+borderColor = "#c5cad1"
+redColor = "#bd413f"
+orangeColor = "#b75f0b"
+yellowColor = "#b37903"
+greenColor = "#33854a"
+blueColor = "#1f74bf"
+violetColor = "#8059bb"
+grayColor = "#65696f"
+chartCategoricalColors = ["#0f6d76", "#1f74bf", "#33854a", "#b37903", "#b75f0b", "#bd413f", "#8059bb"]
+
+# The app panel, one step darker than the canvas.
+[theme.light.sidebar]
+backgroundColor = "#eef0f2"
+secondaryBackgroundColor = "#e2e5e9"
+codeBackgroundColor = "#e2e5e9"
+borderColor = "#c5cad1"

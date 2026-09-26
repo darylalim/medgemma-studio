@@ -1168,14 +1168,40 @@ class TestMlxVlmContract:
         assert "num_images" in params or accepts_var_kw
 
 
+def _wcag_contrast(fg: str, bg: str) -> float:
+    """WCAG 2.x contrast ratio between two ``#rrggbb`` colors (1.0 to 21.0)."""
+
+    def luminance(hex_color: str) -> float:
+        channels = [int(hex_color.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+        r, g, b = (
+            c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+            for c in channels
+        )
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    hi, lo = sorted((luminance(fg), luminance(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _blend(fg: str, bg: str, alpha: float) -> str:
+    """``fg`` painted at ``alpha`` opacity over ``bg``, as a ``#rrggbb`` color."""
+    pairs = zip(
+        (int(fg.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4)),
+        (int(bg.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4)),
+        strict=True,
+    )
+    return "#" + "".join(f"{round(alpha * f + (1 - alpha) * b):02x}" for f, b in pairs)
+
+
 class TestThemeConfig:
     """Guard .streamlit/config.toml. Like TestMlxVlmContract, this checks a real asset
-    (not a mock): the file must parse, stay locked to a SINGLE mode (Streamlit offers
-    the light/dark switch only when both [theme.light] and [theme.dark] exist, so
-    neither may come back), use only theme keys the installed Streamlit recognizes, and
-    keep usage telemetry off. The last one is not a theme setting but shares the file
-    and the same invariant the theme keys are shaped around: an on-device app makes no
-    outbound requests."""
+    (not a mock): the file must parse, keep BOTH a custom light and dark mode, keep
+    every color inside a mode section with the two modes setting the same keys, hold
+    the contrast floors the palette was designed to (on the surfaces Streamlit really
+    paints), use only theme keys the installed Streamlit recognizes, and keep usage
+    telemetry off. The last one is not a theme setting but shares the file and the same
+    invariant the theme keys are shaped around: an on-device app makes no outbound
+    requests."""
 
     CONFIG = Path(__file__).resolve().parent.parent / ".streamlit" / "config.toml"
 
@@ -1268,37 +1294,159 @@ class TestThemeConfig:
                 "status/expander discrimination"
             )
 
-    def test_locks_a_single_mode(self):
-        # The inverse of the auto-switch guard this replaced, and the point of the
-        # current theme: Streamlit renders the light/dark switch in the settings menu
-        # only when BOTH [theme.light] and [theme.dark] exist, so re-adding either one
-        # silently restores the toggle the config is shaped to remove.
-        theme = self._theme()
-        present = [mode for mode in ("light", "dark") if mode in theme]
-        assert not present, f"per-mode sections {present} would re-enable the toggle"
-        # Everything the palette does not override is seeded from `base`, so a locked
-        # theme without one mixes dark surfaces with light-built-in derived accents.
-        assert theme.get("base") in {"light", "dark"}, "locked theme needs a base"
+    MODES = ("light", "dark")
+    # Streamlit's own derived paints (1.64 frontend): st.caption renders at
+    # theme.opacities.secondary, and a selected segmented_control segment sits on
+    # primaryColor at 10% alpha. The app has ~15 captions, and the WSI magnification
+    # control is a segmented_control.
+    CAPTION_OPACITY = 0.6
+    SEGMENT_TINT = 0.1
 
-    def test_defines_the_core_palette(self):
-        # With no per-mode subsections there is no other section left to carry the
-        # core colors -- they have to live in [theme] itself.
+    @staticmethod
+    def _panel(mode: dict) -> str:
+        # The sidebar surface as the frontend resolves it: a mode's sidebar
+        # backgroundColor, else that mode's own secondaryBackgroundColor.
+        return mode.get("sidebar", {}).get(
+            "backgroundColor", mode["secondaryBackgroundColor"]
+        )
+
+    def test_offers_both_modes(self):
+        # Defining either mode section makes Streamlit offer the System / Light / Dark
+        # switch, and a mode whose section is missing is quietly built from the STOCK
+        # palette -- the switch stays. So deleting one section fails nothing at
+        # runtime; it just reverts that mode to Streamlit's defaults. Pin both.
         theme = self._theme()
+        missing = [mode for mode in self.MODES if mode not in theme]
+        assert not missing, (
+            f"{missing} missing: silently falls back to Streamlit's stock palette"
+        )
+
+    def test_modes_define_the_same_palette(self):
+        # A color key one mode sets and the other omits leaves the other on
+        # Streamlit's stock value for it -- a stock blue st.info in one mode only, say.
+        # So the two palettes must set the same keys, sidebars included; and the core
+        # plus the load-bearing semantics (yellow: the disclaimer st.warning; red:
+        # st.error; blue: the stale-result st.info and the localization :blue-badge)
+        # must be among them. A missing sidebar backgroundColor falls back to the
+        # mode's secondaryBackgroundColor, a valid color but not the panel that sits
+        # one step off the canvas -- so each sidebar must set its own.
+        theme = self._theme()
+        light, dark = theme["light"], theme["dark"]
+        flat = {k for k, v in light.items() if not isinstance(v, dict)}
+        assert flat == {k for k, v in dark.items() if not isinstance(v, dict)}, (
+            "light and dark set different keys"
+        )
+        assert set(light.get("sidebar", {})) == set(dark.get("sidebar", {})), (
+            "light and dark sidebars set different keys"
+        )
         core = {
             "primaryColor",
             "backgroundColor",
             "secondaryBackgroundColor",
             "textColor",
+            "linkColor",
+            "yellowColor",
+            "redColor",
+            "blueColor",
         }
-        assert core <= set(theme), "[theme] is missing core colors"
+        assert core <= flat, f"modes are missing core colors: {core - flat}"
+        for mode in self.MODES:
+            assert "backgroundColor" in theme[mode].get("sidebar", {}), (
+                f"[theme.{mode}.sidebar] must set the app panel's surface"
+            )
+
+    def test_colors_live_only_in_mode_sections(self):
+        # Keys in [theme] (and [theme.sidebar]) are shared: they apply to every mode
+        # that doesn't override them. A color there is therefore one palette's value
+        # silently leaking into the other -- a dark textColor over a light canvas the
+        # moment the light section forgets to set its own. Shape and type settings are
+        # mode-independent and belong there; colors never do.
+        theme = self._theme()
+        shared = {**theme, **theme.get("sidebar", {})}
+        leaked = [k for k in shared if k.endswith(("Color", "Colors"))]
+        assert not leaked, f"colors in the shared [theme] block: {leaked}"
+
+    def test_palette_meets_contrast_floors(self):
+        # The ratios the palette was designed to, re-derived from the file so a color
+        # tweak that breaks one fails here rather than in someone's eyes -- measured on
+        # what Streamlit actually paints, not just the raw keys. WCAG 2.x floors: 4.5:1
+        # for text, 3:1 for non-text UI.
+        theme = self._theme()
+        for mode in self.MODES:
+            m = theme[mode]
+            # The panel paints [theme.<mode>.sidebar] over the mode's own keys, so a
+            # sidebar-level textColor or linkColor is what the sidebar really shows.
+            surfaces = {
+                "canvas": (m, m["backgroundColor"]),
+                "sidebar": ({**m, **m.get("sidebar", {})}, self._panel(m)),
+            }
+            for name, (palette, canvas) in surfaces.items():
+                where = f"{mode} {name}"
+                text, link = palette["textColor"], palette["linkColor"]
+                assert _wcag_contrast(text, canvas) >= 7, where
+                # Captions fade the text color to 60%; the light textColor is as dark
+                # as it is precisely so this still clears 4.5:1.
+                caption = _blend(text, canvas, self.CAPTION_OPACITY)
+                assert _wcag_contrast(caption, canvas) >= 4.5, f"{where} caption"
+                assert _wcag_contrast(link, canvas) >= 4.5, f"{where} link"
+                # The active tab underline, the toggle, the slider track and thumb.
+                assert _wcag_contrast(palette["primaryColor"], canvas) >= 3, (
+                    f"{where} accent"
+                )
+            # Streamlit draws primary-button labels in WHITE directly on primaryColor
+            # (hover only darkens it), so this is the Run button's label. The nord
+            # theme this palette replaced failed it at 2.0:1.
+            assert _wcag_contrast("#ffffff", m["primaryColor"]) >= 4.5, (
+                f"{mode} Run label"
+            )
+        # The sidebar's Terms of Use link sits inside an st.caption, faded to 60%
+        # along with it. Dark's pale-aqua linkColor exists to clear 4.5:1 through that
+        # fade; in light mode no tint short of near-black can (the config documents
+        # the ~2.6:1 gap), so only dark is pinned.
+        dark = theme["dark"]
+        panel = self._panel(dark)
+        dark_link = {**dark, **dark.get("sidebar", {})}["linkColor"]
+        faded = _blend(dark_link, panel, self.CAPTION_OPACITY)
+        assert _wcag_contrast(faded, panel) >= 4.5, "dark Terms link, faded in caption"
+        # The theme's one accepted trade-off, pinned where it's resolvable: the
+        # selected tab label, slider value and selected segment label are TEXT in
+        # primaryColor. In dark mode no primary dark enough for the white Run label
+        # also reads at 4.5:1 there (the config documents the ~3.5-3.8:1 it gets); in
+        # light mode the deep teal clears it in every at-rest role.
+        light = theme["light"]
+        primary, canvas = light["primaryColor"], light["backgroundColor"]
+        assert _wcag_contrast(primary, canvas) >= 4.5, "light tab / slider label"
+        segment = _blend(primary, canvas, self.SEGMENT_TINT)
+        assert _wcag_contrast(primary, segment) >= 4.5, "light selected segment label"
+
+    def test_links_are_underlined_on_every_surface(self):
+        # The underline is the link cue: dark mode has no tint that clears both 4.5:1
+        # on the surface and 3:1 against body text, and the sidebar's Terms link sits
+        # in a 60%-opacity caption that fades light mode's tint to ~2.6:1. linkUnderline
+        # layers like every theme key -- [theme] < [theme.<mode>] for the main area,
+        # then [theme.sidebar] < [theme.<mode>.sidebar] for the panel -- so pin the
+        # EFFECTIVE value per surface: an override anywhere would silently drop it.
+        theme = self._theme()
+        for mode in self.MODES:
+            main = {**theme, **theme[mode]}
+            panel = {
+                **main,
+                **theme.get("sidebar", {}),
+                **theme[mode].get("sidebar", {}),
+            }
+            assert main.get("linkUnderline") is True, f"{mode} links lost the underline"
+            assert panel.get("linkUnderline") is True, (
+                f"{mode} sidebar links (the Terms link) lost the underline"
+            )
 
     def test_loads_no_external_assets(self):
         # Inference is fully on-device, so the theme must not be what puts a request
-        # on the wire. nord's stock `font`/`codeFont` pull Inter and JetBrains Mono
-        # from fonts.googleapis.com on every page load; they are dropped on purpose,
-        # and Streamlit's bundled defaults (Source Sans / Source Code, plus the
-        # Material Symbols face) are served from its own static bundle instead. A
-        # value-level URL check, so re-pasting the template wholesale fails here.
+        # on the wire. The bundled theme templates' `font`/`codeFont` (nord's: Inter
+        # and JetBrains Mono) load from fonts.googleapis.com on every page load; they
+        # are left unset on purpose, and Streamlit's bundled defaults (Source Sans /
+        # Source Code, plus the Material Symbols face) are served from its own static
+        # bundle instead. A value-level URL check, so re-pasting a template wholesale
+        # fails here.
         remote: list[str] = []
 
         def walk(section: dict, prefix: str) -> None:
@@ -1366,7 +1514,7 @@ class TestFaviconAsset:
         # light tab strip) is silently invisible in the browser. Require real opaque
         # pixels, and require them not to be near-black -- the stock Material glyph is
         # #000 and all but disappears against a dark tab strip, which is why the
-        # vendored copy is recolored to the theme's primary.
+        # vendored copy is recolored to a teal.
         import streamlit_app
 
         with Image.open(streamlit_app.FAVICON_PATH) as icon:
@@ -1377,6 +1525,21 @@ class TestFaviconAsset:
         assert int(opaque[:, :3].sum(axis=1).max()) > 200, (
             "favicon glyph is too dark to read on a dark tab strip"
         )
+        # The same file is the st.logo mark, drawn on the sidebar of whichever mode is
+        # showing -- so the glyph must clear 3:1 (WCAG non-text) on the light AND dark
+        # panel. The dark mode's pale link tint fails that on light (~1.3:1) and the
+        # light primary fails it on dark (~2.7:1); the dark primary passes but leans
+        # light-side (4.1:1 on light, 3.5:1 on dark). The glyph sits at the lightness
+        # where the two panels' contrasts meet, ~3.8:1 on each.
+        glyph = "#{:02x}{:02x}{:02x}".format(
+            *np.median(opaque[:, :3], axis=0).astype(int)
+        )
+        theme = TestThemeConfig()._theme()
+        for mode in TestThemeConfig.MODES:
+            panel = TestThemeConfig._panel(theme[mode])
+            assert _wcag_contrast(glyph, panel) >= 3, (
+                f"favicon {glyph} is illegible on the {mode} sidebar {panel}"
+            )
 
     def test_page_icon_points_at_the_local_file(self):
         # The invariant that actually costs something if it regresses. A one-word edit

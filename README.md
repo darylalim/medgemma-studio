@@ -25,7 +25,7 @@ Using MedGemma through this app is subject to Google's [Health AI Developer Foun
 - Staged progress feedback while reading a DICOM series or a whole-slide image, before generation begins
 - RAM-aware cap on CT slices / WSI patches (multi-image inference is memory-heavy on unified memory), stated in the sidebar next to the memory it was sized for
 - Results stay visible across reruns and clear — with a hint — when you change the inputs
-- Nord dark theme — a calm, low-glare surround for reading medical images
+- "Reading room" theme in dark and light — the dark mode is a neutral, low-glare surround modeled on radiology reading rooms, so the chrome doesn't tint or wash out the grayscale images beside it; the light mode suits bright rooms and projectors. Follows your system appearance, switchable from the app menu (⋮, top right); text, captions, links and the Run button contrast-checked to WCAG AA on what Streamlit actually renders (the few known exceptions are documented in the theme config)
 - Fully local inference on Apple Silicon via MLX — after the one-time model download the app makes **no outbound network requests**: usage telemetry is off, and fonts and the tab icon are served from the app itself
 
 ## Setup
