@@ -38,7 +38,7 @@ jobs:
           # what the RUNNING uv would produce, so an unpinned uv lets an upstream
           # release turn a green PR red with no repo change -- and the failure is
           # indistinguishable from a genuinely stale lock. Bump with `uv lock`.
-          version: "0.12.5"
+          version: "0.12.19"
           # Keys on the only file that changes the resolution; enable-cache stays absent
           # because `auto` already resolves to on here. Expect little from any of it:
           # setup-uv prunes wheels by default and every dep here IS a wheel, so the cache
