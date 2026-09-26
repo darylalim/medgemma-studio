@@ -2531,6 +2531,8 @@ class TestClaudeMd:
             "parse_boxes",
             "fresh_result_or_hint",
             "tab_settings",
+            "render_sidebar",
+            "workspace_columns",
             "render_ask_tab",
             "render_cxr_tab",
             "render_ct_tab",

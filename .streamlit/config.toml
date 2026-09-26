@@ -86,8 +86,9 @@ orangeColor = "#d08770"
 redColor = "#bf616a"
 violetColor = "#b48ead"
 
-# Inert in this app (no st.sidebar) — kept so the template stays faithful and a future
-# sidebar inherits the palette instead of falling back to the built-in dark.
+# Styles the app panel (render_sidebar in streamlit_app.py): one step lighter than the
+# main background -- the nord template's own surface split -- with showSidebarBorder
+# above drawing the dividing rule.
 [theme.sidebar]
 backgroundColor = "#3b4252"
 secondaryBackgroundColor = "#434c5e"

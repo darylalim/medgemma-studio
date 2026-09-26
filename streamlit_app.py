@@ -21,6 +21,10 @@ from pydicom.pixels import apply_rescale
 load_dotenv()
 
 MODEL_ID = "mlx-community/medgemma-1.5-4b-it-8bit"
+MODEL_CARD_URL = f"https://huggingface.co/{MODEL_ID}"
+HAI_DEF_TERMS_URL = (
+    "https://developers.google.com/health-ai-developer-foundations/terms"
+)
 
 # Browser-tab favicon, vendored as a local PNG rather than named as
 # ":material/clinical_notes:". Streamlit resolves a :material/...: page_icon to an SVG
@@ -706,20 +710,12 @@ def warn_if_truncated(result: dict) -> None:
     routine here rather than exotic: a plain "Describe this chest X-ray" does not fit
     the 300-token budget, and the CT/WSI reads regularly reach 2000.
 
-    Placement is per tab rather than folded into ``show_response`` or
-    ``fresh_result_or_hint``, because the two tab shapes want opposite things:
-
-    - **CXR** warns *before* the mode branch. The localization path draws boxes and a
-      label legend and never calls ``show_response``, and that is precisely where a
-      JSON list clipped at the cap silently costs structures.
-    - **CT / WSI** warn *immediately above* ``show_response``. Their blocks open with
-      full-width imaging (a windowed slice plus the gallery; an overlay plus a sample
-      patch) that fills the viewport under ``layout="centered"``, so a warning at the
-      top is scrolled out of view by the time the reader reaches the report.
-    - **Ask** has nothing between the two, so either reading gives the same layout.
-
-    Consolidating to one call site would have to pick one of those and be wrong for
-    the other half of the tabs.
+    Every tab calls it first in its output column, so it sits directly above the
+    text it qualifies: the imagery that used to separate the two on CT/WSI now lives
+    in the inputs column (see ``workspace_columns``). It is not folded into
+    ``show_response`` because the CXR localization path draws boxes and a label
+    legend and never calls ``show_response`` -- precisely where a JSON list clipped
+    at the cap silently costs structures -- so on CXR it runs before the mode branch.
     """
     if result.get("truncated"):
         st.warning(
@@ -750,10 +746,14 @@ def load_uploaded_image(uploaded_file) -> Image.Image | None:
         return None
 
 
+# Wide, because every tab is a two-column workspace (see workspace_columns): the study
+# and the report sit side by side. Under "centered" the ~730px column forced them into
+# one stack, where a full-width radiograph or slide overview pushed the report below
+# the fold -- the reader could never see an image and the findings about it together.
 st.set_page_config(
     page_title="MedGemma Studio",
     page_icon=str(FAVICON_PATH),
-    layout="centered",
+    layout="wide",
 )
 
 
@@ -826,7 +826,7 @@ def run_model(
         # Prefill -- the vision-tower encode of up to 20 slices/patches, plus prompt
         # processing -- all happens before the first token, and st.write_stream
         # creates no element until the first non-empty chunk. Without a spinner here
-        # the main area is blank through the longest silence of the run (on CT/WSI
+        # the output column is blank through the longest silence of the run (on CT/WSI
         # the st.status has already resolved to complete by this point, so there is
         # nothing live on screen at all). st.spinner is a transient element, so it
         # leaves no gap above the stream once tokens arrive, and its built-in 0.5s
@@ -951,18 +951,53 @@ def _file_sig(uploaded) -> tuple:
 
 
 STALE_RESULT_HINT = "Inputs changed since this result — click Run to refresh."
+EMPTY_OUTPUT_HINT = "The response appears here after you click **Run**."
+
+# Inputs : output, evenly. The inputs side carries more than its name suggests -- the
+# controls plus every image the model saw -- and at 2:3 it wrapped file chips and
+# captions on a 1280px screen while the output column sat half empty beside a short
+# CXR report. Even halves also hold the report near the ~70-character measure prose
+# reads best at on a laptop; 3/5 of the page ran it to ~90.
+WORKSPACE_SPEC = [1, 1]
 
 
-def fresh_result_or_hint(key: str, live_sig) -> dict | None:
+def workspace_columns():
+    """Split a tab into ``(inputs, output)`` columns -- one grammar for all four.
+
+    Inputs: the question, uploads, mode controls, Model settings and Run, then the
+    imagery the model sees (the CXR preview, the windowed CT slices, the WSI overview
+    and a sample patch). Output: what the model says -- preprocessing status, the live
+    stream, the stale hint, and the persisted report. Keeping Run in the inputs column
+    and every image under it means Run stays above the fold once a study is attached,
+    while the report starts at the top of its own column beside the study.
+
+    Below 640px Streamlit stacks the columns, inputs above output. That is NOT the
+    old single-column order: the study preview (and, on a CT/WSI re-run, the previous
+    result's imagery, faded as stale) now sits between Run and the live stream, so on
+    a phone-width window a tap on Run changes nothing in view until you scroll. The
+    server can't see the viewport to reorder for narrow screens, and reordering for
+    everyone would put the image back above Run on the desktop this app runs on.
+    """
+    return st.columns(WORKSPACE_SPEC, gap="large")
+
+
+def fresh_result_or_hint(key: str, live_sig, empty_hint: bool = False) -> dict | None:
     """Single source of truth for the staleness gate shared by every tab.
 
     Returns the persisted result stored under ``key`` when its recorded ``sig`` still
     matches the live inputs. When a result exists but is stale, show a hint and return
     None — an abrupt vanish (the old behavior) reads as a bug in a clinical tool.
-    Returns None with no hint when there is no stored result at all.
+    Returns None when there is no stored result at all, captioning the empty output
+    column when ``empty_hint`` is set -- in the wide workspace a blank right half
+    reads as broken. Callers pass ``not clicked`` (the raw button value, not the
+    ``run_requested`` gate), so a click never ends beside an invitation to click:
+    a run that just failed shows its error alone, and a click with no question
+    shows only "Enter a question first." under the button.
     """
     result = st.session_state.get(key)
     if result is None:
+        if empty_hint:
+            st.caption(EMPTY_OUTPUT_HINT)
         return None
     if result["sig"] != live_sig:
         st.info(STALE_RESULT_HINT, icon=":material/refresh:")
@@ -997,133 +1032,144 @@ def run_requested(clicked: bool, prompt: str) -> bool:
 
 @st.fragment
 def render_ask_tab(model, processor, config):
-    st.caption("Ask a medical question. No image required.")
-    prompt = st.text_input(
-        "Enter your question",
-        placeholder="e.g. What causes a pleural effusion?",
-        key="ask_prompt",
-    ).strip()
-    instruction, is_thinking = tab_settings("ask", DEFAULT_INSTRUCTION_TEXT)
+    inputs, output = workspace_columns()
+    with inputs:
+        st.caption("Ask a medical question. No image required.")
+        prompt = st.text_input(
+            "Enter your question",
+            placeholder="e.g. What causes a pleural effusion?",
+            key="ask_prompt",
+        ).strip()
+        instruction, is_thinking = tab_settings("ask", DEFAULT_INSTRUCTION_TEXT)
+        clicked = st.button("Run", type="primary", width="stretch", key="ask_run")
+        go = run_requested(clicked, prompt)
 
     # Drop a persisted answer once the question or the system instruction changes:
     # the persona is fed to the model as the system message, so it is as much a
     # run-defining input as the prompt itself.
     ask_sig = (prompt, instruction)
 
-    if run_requested(
-        st.button("Run", type="primary", width="stretch", key="ask_run"), prompt
-    ):
-        full_instruction, max_new_tokens = get_generation_params(
-            has_image=False, is_thinking=is_thinking, system_instruction=instruction
-        )
-        messages = build_messages(prompt, full_instruction)
-        finish: dict = {}
-        raw = run_model(
-            model, processor, config, messages, [], max_new_tokens, finish=finish
-        )
-        # Persist the run so it survives later reruns: editing any widget reruns the
-        # script and the Run button returns False, which would otherwise wipe the
-        # answer. The render below reads from session_state on every rerun; the stored
-        # ``sig`` (prompt + persona) lets it drop the result once either changes. On
-        # success, st.rerun() so the just-streamed raw text is discarded and only the
-        # clean persisted render shows (no duplicate). On failure the error stays put.
-        if raw is None:
-            st.session_state["ask_result"] = None
-        else:
-            st.session_state["ask_result"] = {
-                "raw": raw,
-                "is_thinking": is_thinking,
-                # Deliberately not part of ``sig``: truncation is an outcome of the
-                # run, not an input to it, so including it would strand the very
-                # result it describes on the next rerun.
-                "truncated": hit_token_cap(finish),
-                "sig": ask_sig,
-            }
-            st.rerun()
+    with output:
+        if go:
+            full_instruction, max_new_tokens = get_generation_params(
+                has_image=False, is_thinking=is_thinking, system_instruction=instruction
+            )
+            messages = build_messages(prompt, full_instruction)
+            finish: dict = {}
+            raw = run_model(
+                model, processor, config, messages, [], max_new_tokens, finish=finish
+            )
+            # Persist the run so it survives later reruns: editing any widget reruns
+            # the script and the Run button returns False, which would otherwise wipe
+            # the answer. The render below reads from session_state on every rerun;
+            # the stored ``sig`` (prompt + persona) lets it drop the result once
+            # either changes. On success, st.rerun() so the just-streamed raw text is
+            # discarded and only the clean persisted render shows (no duplicate). On
+            # failure the error stays put.
+            if raw is None:
+                st.session_state["ask_result"] = None
+            else:
+                st.session_state["ask_result"] = {
+                    "raw": raw,
+                    "is_thinking": is_thinking,
+                    # Deliberately not part of ``sig``: truncation is an outcome of
+                    # the run, not an input to it, so including it would strand the
+                    # very result it describes on the next rerun.
+                    "truncated": hit_token_cap(finish),
+                    "sig": ask_sig,
+                }
+                st.rerun()
 
-    result = fresh_result_or_hint("ask_result", ask_sig)
-    if result is not None:
-        warn_if_truncated(result)
-        show_response(render_thought(result["raw"], result["is_thinking"]))
+        result = fresh_result_or_hint("ask_result", ask_sig, empty_hint=not clicked)
+        if result is not None:
+            warn_if_truncated(result)
+            show_response(render_thought(result["raw"], result["is_thinking"]))
 
 
 @st.fragment
 def render_cxr_tab(model, processor, config):
-    st.caption(
-        "Analyze a chest X-ray. Add a second image to compare two studies, or turn "
-        "on 'Locate anatomy' to outline structures with bounding boxes."
-    )
-    prompt = st.text_input(
-        "Enter your question",
-        placeholder="e.g. Describe this chest X-ray",
-        key="cxr_prompt",
-    ).strip()
+    inputs, output = workspace_columns()
+    with inputs:
+        st.caption(
+            "Analyze a chest X-ray. Add a second image to compare two studies, or "
+            "turn on 'Locate anatomy' to outline structures with bounding boxes."
+        )
+        prompt = st.text_input(
+            "Enter your question",
+            placeholder="e.g. Describe this chest X-ray",
+            key="cxr_prompt",
+        ).strip()
 
-    # max_upload_size pins these back to Streamlit's stock 200 MB: the global ceiling
-    # in .streamlit/config.toml is raised to 2000 for whole-slide images, and a
-    # radiograph has no business anywhere near that.
-    upload1 = st.file_uploader(
-        "Upload a chest X-ray",
-        type=IMAGE_TYPES,
-        max_upload_size=NON_WSI_MAX_UPLOAD_MB,
-        key="cxr_image1",
-    )
-    image1 = load_uploaded_image(upload1)
-    # A second slot appears only once the first image exists, so the model can
-    # compare two studies (e.g. longitudinal CXR) in a single prompt.
-    upload2 = None
-    image2 = None
-    if image1 is not None:
-        upload2 = st.file_uploader(
-            "Upload a second image to compare (optional)",
+        # max_upload_size pins these back to Streamlit's stock 200 MB: the global
+        # ceiling in .streamlit/config.toml is raised to 2000 for whole-slide images,
+        # and a radiograph has no business anywhere near that.
+        upload1 = st.file_uploader(
+            "Upload a chest X-ray",
             type=IMAGE_TYPES,
             max_upload_size=NON_WSI_MAX_UPLOAD_MB,
-            key="cxr_image2",
+            key="cxr_image1",
         )
-        image2 = load_uploaded_image(upload2)
+        image1 = load_uploaded_image(upload1)
+        # A second slot appears only once the first image exists, so the model can
+        # compare two studies (e.g. longitudinal CXR) in a single prompt.
+        upload2 = None
+        image2 = None
+        if image1 is not None:
+            upload2 = st.file_uploader(
+                "Upload a second image to compare (optional)",
+                type=IMAGE_TYPES,
+                max_upload_size=NON_WSI_MAX_UPLOAD_MB,
+                key="cxr_image2",
+            )
+            image2 = load_uploaded_image(upload2)
 
-    # Preview side by side in comparison mode — seeing both studies at once is the
-    # whole point of a longitudinal read; otherwise a single full-width preview.
-    if image1 is not None and image2 is not None:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(image1, caption="First image", width="stretch")
-        with col2:
-            st.image(image2, caption="Second image", width="stretch")
-    elif image1 is not None:
-        st.image(image1, caption="Uploaded image", width="stretch")
+        images = [img for img in (image1, image2) if img is not None]
+        has_image = len(images) >= 1
+        is_comparing = len(images) == 2
 
-    images = [img for img in (image1, image2) if img is not None]
-    has_image = len(images) >= 1
-    is_comparing = len(images) == 2
-
-    is_localizing = st.toggle(
-        "Locate anatomy (bounding boxes)",
-        disabled=len(images) != 1,
-        help="Outline anatomy with bounding boxes. Requires a single image.",
-        key="cxr_localize",
-    )
-    if is_localizing and len(images) == 1:
-        st.caption(
-            ":material/info: Localization uses a built-in prompt; the System "
-            "instruction below is ignored in this mode."
+        is_localizing = st.toggle(
+            "Locate anatomy (bounding boxes)",
+            disabled=len(images) != 1,
+            help="Outline anatomy with bounding boxes. Requires a single image.",
+            key="cxr_localize",
         )
-    elif is_comparing:
-        st.caption(
-            ":material/info: Comparison mode: both images are sent to the model "
-            "together."
-        )
+        if is_localizing and len(images) == 1:
+            st.caption(
+                ":material/info: Localization uses a built-in prompt; the System "
+                "instruction below is ignored in this mode."
+            )
+        elif is_comparing:
+            st.caption(
+                ":material/info: Comparison mode: both images are sent to the model "
+                "together."
+            )
 
-    # Rendered last, immediately above Run, the way the other three tabs do it: the
-    # collapsed persona box is advanced and rarely edited, so it should not sit in
-    # the middle of the tab's primary controls. (auto_switch still tracks the
-    # comparison persona -- the widget is created on every run either way.)
-    default_instruction = (
-        DEFAULT_INSTRUCTION_COMPARE if is_comparing else DEFAULT_INSTRUCTION_IMAGE
-    )
-    instruction, is_thinking = tab_settings(
-        "cxr", default_instruction, auto_switch=True
-    )
+        # Rendered last, immediately above Run, the way the other three tabs do it:
+        # the collapsed persona box is advanced and rarely edited, so it should not
+        # sit in the middle of the tab's primary controls. (auto_switch still tracks
+        # the comparison persona -- the widget is created on every run either way.)
+        default_instruction = (
+            DEFAULT_INSTRUCTION_COMPARE if is_comparing else DEFAULT_INSTRUCTION_IMAGE
+        )
+        instruction, is_thinking = tab_settings(
+            "cxr", default_instruction, auto_switch=True
+        )
+        clicked = st.button("Run", type="primary", width="stretch", key="cxr_run")
+        go = run_requested(clicked, prompt)
+
+        # The preview renders under Run, not between the uploader and the controls
+        # as it did in the single-column layout: a portrait radiograph is taller than
+        # the viewport's spare height, so above Run it pushed the button off-screen
+        # the moment an image was attached. Side by side in comparison mode --
+        # seeing both studies at once is the whole point of a longitudinal read.
+        if image1 is not None and image2 is not None:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.image(image1, caption="First image", width="stretch")
+            with col2:
+                st.image(image2, caption="Second image", width="stretch")
+        elif image1 is not None:
+            st.image(image1, caption="Uploaded image", width="stretch")
 
     # Signature of the inputs this result depends on: a stale result is dropped
     # (not rendered) once the prompt, either upload, the localize mode, or the system
@@ -1138,152 +1184,166 @@ def render_cxr_tab(model, processor, config):
         None if (is_localizing and len(images) == 1) else instruction,
     )
 
-    if run_requested(
-        st.button("Run", type="primary", width="stretch", key="cxr_run"), prompt
-    ):
-        # Localization is single-image only; with two images it is unavailable.
-        localize = is_localizing and len(images) == 1
-        localize_size: tuple[int, int] | None = None
-        full_instruction, max_new_tokens = get_generation_params(
-            has_image,
-            is_thinking,
-            instruction,
-            is_localizing=localize,
-            is_comparing=is_comparing,
-        )
+    with output:
+        if go:
+            # Localization is single-image only; with two images it is unavailable.
+            localize = is_localizing and len(images) == 1
+            localize_size: tuple[int, int] | None = None
+            full_instruction, max_new_tokens = get_generation_params(
+                has_image,
+                is_thinking,
+                instruction,
+                is_localizing=localize,
+                is_comparing=is_comparing,
+            )
 
-        if localize:
-            # Pad to a square so the model's [0, 1000] coordinates map back without
-            # an offset, then crop the annotated result to the original size.
-            localize_size = images[0].size
-            model_images = [pad_to_square(images[0])]
-        else:
-            model_images = images
-
-        # Label the two studies so the comparison persona's "first/second image"
-        # wording binds to a specific image regardless of attention ordering.
-        image_labels = ["First image:", "Second image:"] if is_comparing else None
-        messages = build_messages(
-            prompt, full_instruction, model_images, image_labels=image_labels
-        )
-        finish: dict = {}
-        raw = run_model(
-            model,
-            processor,
-            config,
-            messages,
-            model_images,
-            max_new_tokens,
-            penalize_repetition=not localize,
-            finish=finish,
-        )
-        # Persist the finished run (see render_ask_tab). For localization, parse the
-        # boxes and draw the annotation once here — strip any thinking trace with
-        # parse_response so the expander is rendered only in the block below. On
-        # success st.rerun() so the streamed raw text is replaced by the clean render.
-        if raw is None:
-            st.session_state["cxr_result"] = None
-        else:
             if localize:
-                _, answer = parse_response(raw, is_thinking)
-                boxes = parse_boxes(answer)
-                annotated = None
-                if boxes and localize_size is not None:
-                    width, height = localize_size
-                    annotated = draw_boxes(model_images[0], boxes).crop(
-                        (0, 0, width, height)
-                    )
-                st.session_state["cxr_result"] = {
-                    "mode": "localize",
-                    "raw": raw,
-                    "is_thinking": is_thinking,
-                    "annotated": annotated,
-                    "boxes": boxes,
-                    "truncated": hit_token_cap(finish),
-                    "sig": cxr_sig,
-                }
+                # Pad to a square so the model's [0, 1000] coordinates map back without
+                # an offset, then crop the annotated result to the original size.
+                localize_size = images[0].size
+                model_images = [pad_to_square(images[0])]
             else:
-                st.session_state["cxr_result"] = {
-                    "mode": "text",
-                    "raw": raw,
-                    "is_thinking": is_thinking,
-                    "truncated": hit_token_cap(finish),
-                    "sig": cxr_sig,
-                }
-            st.rerun()
+                model_images = images
 
-    result = fresh_result_or_hint("cxr_result", cxr_sig)
-    if result is None:
-        return
-    # Ahead of the mode branch on purpose: the localization path below renders boxes
-    # and a legend but never reaches show_response, and a box list clipped at the
-    # token cap is exactly where an unflagged truncation costs the most.
-    warn_if_truncated(result)
-    response = render_thought(result["raw"], result["is_thinking"])
-    if result["mode"] == "localize":
-        if result["annotated"] is not None:
-            st.image(result["annotated"], caption="Localized anatomy", width="stretch")
-            st.markdown("### Detected structures")
-            # The boxes are drawn on the image above, so list the labels rather
-            # than the raw normalized coordinates (cryptic to a clinician). Badges
-            # wrap into a compact legend instead of a bullet per box, keeping the
-            # annotated image and its labels on screen together. A ']' inside a
-            # model-emitted label would terminate the directive early, so strip it.
-            st.markdown(
-                " ".join(
-                    f":blue-badge[{(box['label'] or 'unlabeled').replace(']', ' ')}]"
+            # Label the two studies so the comparison persona's "first/second image"
+            # wording binds to a specific image regardless of attention ordering.
+            image_labels = ["First image:", "Second image:"] if is_comparing else None
+            messages = build_messages(
+                prompt, full_instruction, model_images, image_labels=image_labels
+            )
+            finish: dict = {}
+            raw = run_model(
+                model,
+                processor,
+                config,
+                messages,
+                model_images,
+                max_new_tokens,
+                penalize_repetition=not localize,
+                finish=finish,
+            )
+            # Persist the finished run (see render_ask_tab). For localization, parse
+            # the boxes and draw the annotation once here — strip any thinking trace
+            # with parse_response so the expander is rendered only in the block below.
+            # On success st.rerun() so the streamed raw text is replaced by the clean
+            # render.
+            if raw is None:
+                st.session_state["cxr_result"] = None
+            else:
+                if localize:
+                    _, answer = parse_response(raw, is_thinking)
+                    boxes = parse_boxes(answer)
+                    annotated = None
+                    if boxes and localize_size is not None:
+                        width, height = localize_size
+                        annotated = draw_boxes(model_images[0], boxes).crop(
+                            (0, 0, width, height)
+                        )
+                    st.session_state["cxr_result"] = {
+                        "mode": "localize",
+                        "raw": raw,
+                        "is_thinking": is_thinking,
+                        "annotated": annotated,
+                        "boxes": boxes,
+                        "truncated": hit_token_cap(finish),
+                        "sig": cxr_sig,
+                    }
+                else:
+                    st.session_state["cxr_result"] = {
+                        "mode": "text",
+                        "raw": raw,
+                        "is_thinking": is_thinking,
+                        "truncated": hit_token_cap(finish),
+                        "sig": cxr_sig,
+                    }
+                st.rerun()
+
+        result = fresh_result_or_hint("cxr_result", cxr_sig, empty_hint=not clicked)
+        if result is None:
+            return
+        # Ahead of the mode branch on purpose: the localization path below renders boxes
+        # and a legend but never reaches show_response, and a box list clipped at the
+        # token cap is exactly where an unflagged truncation costs the most.
+        warn_if_truncated(result)
+        response = render_thought(result["raw"], result["is_thinking"])
+        if result["mode"] == "localize":
+            if result["annotated"] is not None:
+                st.image(
+                    result["annotated"], caption="Localized anatomy", width="stretch"
+                )
+                st.markdown("### Detected structures")
+                # The boxes are drawn on the image above, so list the labels rather
+                # than the raw normalized coordinates (cryptic to a clinician). Badges
+                # wrap into a compact legend instead of a bullet per box, keeping the
+                # annotated image and its labels on screen together. A ']' inside a
+                # model-emitted label would terminate the directive early, so strip it.
+                labels = (
+                    (box["label"] or "unlabeled").replace("]", " ")
                     for box in result["boxes"]
                 )
-            )
+                st.markdown(" ".join(f":blue-badge[{label}]" for label in labels))
+            else:
+                st.warning(
+                    "No bounding boxes were returned.", icon=":material/search_off:"
+                )
+                show_response(response)
         else:
-            st.warning("No bounding boxes were returned.", icon=":material/search_off:")
             show_response(response)
-    else:
-        show_response(response)
 
 
 @st.fragment
 def render_ct_tab(model, processor, config):
-    st.caption(
-        "Upload a CT series as individual DICOM slice files. Each slice is windowed "
-        "into a false-color image (the representation MedGemma 1.5 is trained on)."
-    )
-    prompt = st.text_input(
-        "Enter your question",
-        placeholder="e.g. Are there hypodense liver lesions?",
-        key="ct_prompt",
-    ).strip()
-    dicom_files = st.file_uploader(
-        "Upload CT DICOM slices",
-        accept_multiple_files=True,
-        # No type= filter on purpose: per-slice DICOMs off a PACS or a study CD are
-        # routinely extensionless. Say so, since this is the only uploader of the
-        # four whose dropzone lists no accepted types.
-        help="Files may be extensionless (e.g. IM_0001) — a .dcm extension is not "
-        "required.",
-        # The narrowing that matters most of the three: this uploader takes many
-        # files at once, filters none of them, and reads every slice fully into
-        # memory, so it should not inherit the slide tab's 2000 MB ceiling.
-        max_upload_size=NON_WSI_MAX_UPLOAD_MB,
-        key="ct_files",
-    )
-
-    default_slices, max_slices = ram_aware_slice_cap()
-    if max_slices > 2:
-        n_slices = st.slider(
-            "Slices to analyze",
-            min_value=2,
-            max_value=max_slices,
-            value=default_slices,
-            help="Slices are sampled uniformly across the volume. The cap scales to "
-            "your machine's memory.",
-            key="ct_slices",
+    inputs, output = workspace_columns()
+    with inputs:
+        st.caption(
+            "Upload a CT series as individual DICOM slice files. Each slice is "
+            "windowed into a false-color image (the representation MedGemma 1.5 is "
+            "trained on)."
         )
-    else:
-        n_slices = 2
-        st.caption("Limited memory detected: analyzing 2 slices.")
+        prompt = st.text_input(
+            "Enter your question",
+            placeholder="e.g. Are there hypodense liver lesions?",
+            key="ct_prompt",
+        ).strip()
+        dicom_files = st.file_uploader(
+            "Upload CT DICOM slices",
+            accept_multiple_files=True,
+            # No type= filter on purpose: per-slice DICOMs off a PACS or a study CD are
+            # routinely extensionless. Say so, since this is the only uploader of the
+            # four whose dropzone lists no accepted types.
+            help="Files may be extensionless (e.g. IM_0001) — a .dcm extension is not "
+            "required.",
+            # The narrowing that matters most of the three: this uploader takes many
+            # files at once, filters none of them, and reads every slice fully into
+            # memory, so it should not inherit the slide tab's 2000 MB ceiling.
+            max_upload_size=NON_WSI_MAX_UPLOAD_MB,
+            key="ct_files",
+        )
 
-    instruction, is_thinking = tab_settings("ct", DEFAULT_INSTRUCTION_CT)
+        default_slices, max_slices = ram_aware_slice_cap()
+        if max_slices > 2:
+            n_slices = st.slider(
+                "Slices to analyze",
+                min_value=2,
+                max_value=max_slices,
+                value=default_slices,
+                help="Slices are sampled uniformly across the volume. The cap scales "
+                "to your machine's memory.",
+                key="ct_slices",
+            )
+        else:
+            n_slices = 2
+            st.caption("Limited memory detected: analyzing 2 slices.")
+
+        instruction, is_thinking = tab_settings("ct", DEFAULT_INSTRUCTION_CT)
+        clicked = st.button(
+            "Run",
+            type="primary",
+            disabled=not dicom_files,
+            width="stretch",
+            key="ct_run",
+        )
+        go = run_requested(clicked, prompt)
 
     # Drop a persisted result once the prompt, uploaded slices, slice count, or
     # system instruction change.
@@ -1294,255 +1354,324 @@ def render_ct_tab(model, processor, config):
         instruction,
     )
 
-    if run_requested(
-        st.button(
-            "Run",
-            type="primary",
-            disabled=not dicom_files,
-            width="stretch",
-            key="ct_run",
-        ),
-        prompt,
-    ):
-        # Clear any prior run, then do the heavy work inside the button block;
-        # persist the result so it survives later reruns (see render_ask_tab). An
-        # st.status narrates the otherwise-silent preprocessing (DICOM read +
-        # windowing); generation then streams in the main area below the status, so
-        # its live tokens aren't buried in a collapsed box.
-        st.session_state["ct_result"] = None
-        slice_images = None
-        with st.status("Preparing CT series…", expanded=False) as status:
-            status.update(label="Reading DICOM series…")
-            try:
-                hu_slices = cached_ct_volume(dicom_files, n_slices)
-            except Exception as e:
-                st.error(f"Failed to read DICOM series: {e}", icon=":material/error:")
-                hu_slices = None
-            if hu_slices is None:
-                status.update(
-                    label="Could not read DICOM series", state="error", expanded=True
+    with output:
+        if go:
+            # Clear any prior run, then do the heavy work inside the button block;
+            # persist the result so it survives later reruns (see render_ask_tab). An
+            # st.status narrates the otherwise-silent preprocessing (DICOM read +
+            # windowing); generation then streams in this column below the status,
+            # so its live tokens aren't buried in a collapsed box.
+            st.session_state["ct_result"] = None
+            slice_images = None
+            with st.status("Preparing CT series…", expanded=False) as status:
+                status.update(label="Reading DICOM series…")
+                try:
+                    hu_slices = cached_ct_volume(dicom_files, n_slices)
+                except Exception as e:
+                    st.error(
+                        f"Failed to read DICOM series: {e}", icon=":material/error:"
+                    )
+                    hu_slices = None
+                if hu_slices is None:
+                    status.update(
+                        label="Could not read DICOM series",
+                        state="error",
+                        expanded=True,
+                    )
+                else:
+                    status.update(label="Windowing slices…")
+                    slice_images = [window_ct_slice(hu) for hu in hu_slices]
+                    status.update(
+                        label=f"Prepared {len(slice_images)} slices", state="complete"
+                    )
+            if slice_images is not None:
+                labels = [f"SLICE {i}" for i in range(1, len(slice_images) + 1)]
+                full_instruction, max_new_tokens = get_generation_params(
+                    has_image=True,
+                    is_thinking=is_thinking,
+                    system_instruction=instruction,
+                    is_ct=True,
                 )
-            else:
-                status.update(label="Windowing slices…")
-                slice_images = [window_ct_slice(hu) for hu in hu_slices]
-                status.update(
-                    label=f"Prepared {len(slice_images)} slices", state="complete"
+                messages = build_messages(
+                    prompt, full_instruction, slice_images, image_labels=labels
                 )
-        if slice_images is not None:
-            labels = [f"SLICE {i}" for i in range(1, len(slice_images) + 1)]
-            full_instruction, max_new_tokens = get_generation_params(
-                has_image=True,
-                is_thinking=is_thinking,
-                system_instruction=instruction,
-                is_ct=True,
-            )
-            messages = build_messages(
-                prompt, full_instruction, slice_images, image_labels=labels
-            )
-            finish: dict = {}
-            raw = run_model(
-                model,
-                processor,
-                config,
-                messages,
-                slice_images,
-                max_new_tokens,
-                finish=finish,
-            )
-            if raw is not None:
-                st.session_state["ct_result"] = {
-                    "preview": slice_images[0],
-                    "thumbs": ct_thumbnails(slice_images),
-                    "labels": labels,
-                    "count": len(slice_images),
-                    "raw": raw,
-                    "is_thinking": is_thinking,
-                    "truncated": hit_token_cap(finish),
-                    "sig": ct_sig,
-                }
-                # Discard the streamed run so only the clean render (preview +
-                # response) shows; the status was live feedback during this run.
-                st.rerun()
+                finish: dict = {}
+                raw = run_model(
+                    model,
+                    processor,
+                    config,
+                    messages,
+                    slice_images,
+                    max_new_tokens,
+                    finish=finish,
+                )
+                if raw is not None:
+                    st.session_state["ct_result"] = {
+                        "preview": slice_images[0],
+                        "thumbs": ct_thumbnails(slice_images),
+                        "labels": labels,
+                        "count": len(slice_images),
+                        "raw": raw,
+                        "is_thinking": is_thinking,
+                        "truncated": hit_token_cap(finish),
+                        "sig": ct_sig,
+                    }
+                    # Discard the streamed run so only the clean render (preview +
+                    # response) shows; the status was live feedback during this run.
+                    st.rerun()
 
-    result = fresh_result_or_hint("ct_result", ct_sig)
+        result = fresh_result_or_hint("ct_result", ct_sig, empty_hint=not clicked)
     if result is None:
         return
-    st.image(
-        result["preview"],
-        caption=f"Sample windowed slice (1 of {result['count']})",
-        width="stretch",
-    )
-    # The model numbers its findings by slice, so give the reader a way to actually
-    # look at the slice a finding names -- the single preview above left "slice 7"
-    # unauditable. Collapsed by default: this is for checking a claim, not browsing.
-    # (WSI needs no equivalent; its overlay already outlines every sampled patch.)
-    thumbs = result.get("thumbs")
-    if thumbs:
-        # An expander body is computed and shipped to the frontend even while
-        # collapsed (Streamlit documents this), and st.image re-encodes every
-        # thumbnail to PNG -- work paid on every fragment rerun of a panel most
-        # sessions never open, and it scales with ram_aware_slice_cap's 64-slice
-        # ceiling. on_change="rerun" + .open defers it to the click. The key is what
-        # makes .open readable at all, and it doubles as the handle a test needs:
-        # under AppTest the expander starts closed, so without it the body would be
-        # unreachable and the gallery untestable.
-        gallery = st.expander(
-            f"View all {result['count']} windowed slices",
-            type="compact",
-            on_change="rerun",
-            key="ct_gallery",
+    with inputs:
+        st.image(
+            result["preview"],
+            caption=f"Sample windowed slice (1 of {result['count']})",
+            width="stretch",
         )
-        if gallery.open:
-            with gallery:
-                st.image(thumbs, caption=result["labels"], width=180)
-    # Directly above the answer, not at the top of the block: a full-width windowed
-    # slice plus the gallery fill the viewport under layout="centered", so a warning
-    # up there is scrolled off by the time the reader reaches the report it qualifies.
-    # (The CXR tab warns before its mode branch instead -- see render_cxr_tab.)
-    warn_if_truncated(result)
-    show_response(render_thought(result["raw"], result["is_thinking"]))
+        # The model numbers its findings by slice, so give the reader a way to
+        # actually look at the slice a finding names -- the single preview above left
+        # "slice 7" unauditable. Collapsed by default: this is for checking a claim,
+        # not browsing. (WSI needs no equivalent; its overlay already outlines every
+        # sampled patch.)
+        thumbs = result.get("thumbs")
+        if thumbs:
+            # An expander body is computed and shipped to the frontend even while
+            # collapsed (Streamlit documents this), and st.image re-encodes every
+            # thumbnail to PNG -- work paid on every fragment rerun of a panel most
+            # sessions never open, and it scales with ram_aware_slice_cap's 64-slice
+            # ceiling. on_change="rerun" + .open defers it to the click. The key is what
+            # makes .open readable at all, and it doubles as the handle a test needs:
+            # under AppTest the expander starts closed, so without it the body would be
+            # unreachable and the gallery untestable.
+            gallery = st.expander(
+                f"View all {result['count']} windowed slices",
+                type="compact",
+                on_change="rerun",
+                key="ct_gallery",
+            )
+            if gallery.open:
+                with gallery:
+                    st.image(thumbs, caption=result["labels"], width=180)
+    with output:
+        # The slice imagery lives in the inputs column, so the report column opens
+        # with this warning and it sits directly above the text it qualifies.
+        warn_if_truncated(result)
+        show_response(render_thought(result["raw"], result["is_thinking"]))
 
 
 @st.fragment
 def render_wsi_tab(model, processor, config):
-    st.caption(
-        "Upload a whole-slide image (.svs/.ndpi/.tiff). Tissue patches are sampled at "
-        "a chosen magnification and read as the 896px tiles MedGemma 1.5 is trained on."
-    )
-    prompt = st.text_input(
-        "Enter your question",
-        placeholder="e.g. Describe the histologic findings",
-        key="wsi_prompt",
-    ).strip()
-    slide_file = st.file_uploader("Upload a slide", type=WSI_TYPES, key="wsi_files")
-    # segmented_control (not select_slider): these are four discrete objective-power
-    # modes, like a microscope turret, and one-tap selection beats landing a slider
-    # handle on a tick. ``required=True`` because a single-select segmented_control
-    # otherwise returns None when the user taps the already-selected chip -- which
-    # left no chip highlighted while an ``or WSI_DEFAULT_MAG`` fallback quietly
-    # analyzed at 10x, i.e. the visible control and the magnification sent to the
-    # model disagreed. It also narrows the return type from ``int | None`` to ``int``.
-    target_mag = st.segmented_control(
-        "Magnification",
-        options=WSI_MAGNIFICATIONS,
-        default=WSI_DEFAULT_MAG,
-        required=True,
-        format_func=lambda m: f"{m}×",
-        help="Higher magnification shows finer detail over less area. Clamped to "
-        "the slide's available pyramid levels.",
-        key="wsi_mag",
-    )
-
-    default_patches, max_patches = ram_aware_slice_cap()
-    if max_patches > 2:
-        n_patches = st.slider(
-            "Patches to analyze",
-            min_value=2,
-            max_value=max_patches,
-            value=default_patches,
-            help="Tissue patches are sampled uniformly across the slide. The cap "
-            "scales to your machine's memory.",
-            key="wsi_patches",
+    inputs, output = workspace_columns()
+    with inputs:
+        st.caption(
+            "Upload a whole-slide image (.svs/.ndpi/.tiff). Tissue patches are "
+            "sampled at a chosen magnification and read as the 896px tiles MedGemma "
+            "1.5 is trained on."
         )
-    else:
-        n_patches = 2
-        st.caption("Limited memory detected: analyzing 2 patches.")
+        prompt = st.text_input(
+            "Enter your question",
+            placeholder="e.g. Describe the histologic findings",
+            key="wsi_prompt",
+        ).strip()
+        slide_file = st.file_uploader("Upload a slide", type=WSI_TYPES, key="wsi_files")
+        # segmented_control (not select_slider): these are four discrete
+        # objective-power modes, like a microscope turret, and one-tap selection beats
+        # landing a slider handle on a tick. ``required=True`` because a single-select
+        # segmented_control otherwise returns None when the user taps the
+        # already-selected chip -- which left no chip highlighted while an
+        # ``or WSI_DEFAULT_MAG`` fallback quietly analyzed at 10x, i.e. the visible
+        # control and the magnification sent to the model disagreed. It also narrows
+        # the return type from ``int | None`` to ``int``.
+        target_mag = st.segmented_control(
+            "Magnification",
+            options=WSI_MAGNIFICATIONS,
+            default=WSI_DEFAULT_MAG,
+            required=True,
+            format_func=lambda m: f"{m}×",
+            help="Higher magnification shows finer detail over less area. Clamped to "
+            "the slide's available pyramid levels.",
+            key="wsi_mag",
+        )
 
-    instruction, is_thinking = tab_settings("wsi", DEFAULT_INSTRUCTION_WSI)
+        default_patches, max_patches = ram_aware_slice_cap()
+        if max_patches > 2:
+            n_patches = st.slider(
+                "Patches to analyze",
+                min_value=2,
+                max_value=max_patches,
+                value=default_patches,
+                help="Tissue patches are sampled uniformly across the slide. The cap "
+                "scales to your machine's memory.",
+                key="wsi_patches",
+            )
+        else:
+            n_patches = 2
+            st.caption("Limited memory detected: analyzing 2 patches.")
 
-    # Drop a persisted result once the prompt, slide, magnification, patch count, or
-    # system instruction change.
-    wsi_sig = (prompt, _file_sig(slide_file), target_mag, n_patches, instruction)
-
-    if run_requested(
-        st.button(
+        instruction, is_thinking = tab_settings("wsi", DEFAULT_INSTRUCTION_WSI)
+        clicked = st.button(
             "Run",
             type="primary",
             disabled=not slide_file,
             width="stretch",
             key="wsi_run",
-        ),
-        prompt,
-    ):
-        # Clear any prior run, then do the heavy work inside the button block;
-        # persist the result so it survives later reruns (see render_ask_tab). An
-        # st.status narrates the otherwise-silent slide read + tissue sampling (which
-        # can take many seconds on a multi-GB slide); generation then streams in the
-        # main area below the status, so its live tokens aren't buried in a box.
-        st.session_state["wsi_result"] = None
-        overlay = None
-        actual_mag = None
-        with st.status("Preparing slide…", expanded=False) as status:
-            status.update(label="Reading slide and sampling tissue…")
-            try:
-                patches, overlay, actual_mag = cached_wsi_patches(
-                    slide_file, target_mag, n_patches
-                )
-            except Exception as e:
-                st.error(f"Failed to read slide: {e}", icon=":material/error:")
-                patches = None
-            if patches is None:
-                status.update(
-                    label="Could not read slide", state="error", expanded=True
-                )
-            else:
-                status.update(
-                    label=f"Prepared {len(patches)} patches", state="complete"
-                )
-        if patches is not None:
-            labels = [f"PATCH {i}" for i in range(1, len(patches) + 1)]
-            full_instruction, max_new_tokens = get_generation_params(
-                has_image=True,
-                is_thinking=is_thinking,
-                system_instruction=instruction,
-                is_wsi=True,
-            )
-            messages = build_messages(
-                prompt, full_instruction, patches, image_labels=labels
-            )
-            finish: dict = {}
-            raw = run_model(
-                model,
-                processor,
-                config,
-                messages,
-                patches,
-                max_new_tokens,
-                finish=finish,
-            )
-            if raw is not None:
-                st.session_state["wsi_result"] = {
-                    "overlay": overlay,
-                    "actual_mag": actual_mag,
-                    "count": len(patches),
-                    "preview": patches[0],
-                    "raw": raw,
-                    "is_thinking": is_thinking,
-                    "truncated": hit_token_cap(finish),
-                    "sig": wsi_sig,
-                }
-                # Discard the streamed run so only the clean render (overlay + sample
-                # patch + response) shows; the status was live feedback this run.
-                st.rerun()
+        )
+        go = run_requested(clicked, prompt)
 
-    result = fresh_result_or_hint("wsi_result", wsi_sig)
+    # Drop a persisted result once the prompt, slide, magnification, patch count, or
+    # system instruction change.
+    wsi_sig = (prompt, _file_sig(slide_file), target_mag, n_patches, instruction)
+
+    with output:
+        if go:
+            # Clear any prior run, then do the heavy work inside the button block;
+            # persist the result so it survives later reruns (see render_ask_tab). An
+            # st.status narrates the otherwise-silent slide read + tissue sampling
+            # (which can take many seconds on a multi-GB slide); generation then
+            # streams in this column below the status, so its live tokens aren't
+            # buried in a box.
+            st.session_state["wsi_result"] = None
+            overlay = None
+            actual_mag = None
+            with st.status("Preparing slide…", expanded=False) as status:
+                status.update(label="Reading slide and sampling tissue…")
+                try:
+                    patches, overlay, actual_mag = cached_wsi_patches(
+                        slide_file, target_mag, n_patches
+                    )
+                except Exception as e:
+                    st.error(f"Failed to read slide: {e}", icon=":material/error:")
+                    patches = None
+                if patches is None:
+                    status.update(
+                        label="Could not read slide", state="error", expanded=True
+                    )
+                else:
+                    status.update(
+                        label=f"Prepared {len(patches)} patches", state="complete"
+                    )
+            if patches is not None:
+                labels = [f"PATCH {i}" for i in range(1, len(patches) + 1)]
+                full_instruction, max_new_tokens = get_generation_params(
+                    has_image=True,
+                    is_thinking=is_thinking,
+                    system_instruction=instruction,
+                    is_wsi=True,
+                )
+                messages = build_messages(
+                    prompt, full_instruction, patches, image_labels=labels
+                )
+                finish: dict = {}
+                raw = run_model(
+                    model,
+                    processor,
+                    config,
+                    messages,
+                    patches,
+                    max_new_tokens,
+                    finish=finish,
+                )
+                if raw is not None:
+                    st.session_state["wsi_result"] = {
+                        "overlay": overlay,
+                        "actual_mag": actual_mag,
+                        "count": len(patches),
+                        "preview": patches[0],
+                        "raw": raw,
+                        "is_thinking": is_thinking,
+                        "truncated": hit_token_cap(finish),
+                        "sig": wsi_sig,
+                    }
+                    # Discard the streamed run so only the clean render (overlay +
+                    # sample patch + response) shows; the status was live feedback
+                    # this run.
+                    st.rerun()
+
+        result = fresh_result_or_hint("wsi_result", wsi_sig, empty_hint=not clicked)
     if result is None:
         return
-    st.image(result["overlay"], caption="Tissue overview", width="stretch")
-    st.caption(f"{result['count']} patches sampled at ~{result['actual_mag']:.1f}x.")
-    st.image(
-        result["preview"],
-        caption=f"Sample patch (1 of {result['count']})",
-        width="stretch",
-    )
-    # Above the answer, for the reason spelled out in render_ct_tab: two full-width
-    # images sit between the top of this block and the report.
-    warn_if_truncated(result)
-    show_response(render_thought(result["raw"], result["is_thinking"]))
+    with inputs:
+        st.image(result["overlay"], caption="Tissue overview", width="stretch")
+        st.caption(
+            f"{result['count']} patches sampled at ~{result['actual_mag']:.1f}x."
+        )
+        st.image(
+            result["preview"],
+            caption=f"Sample patch (1 of {result['count']})",
+            width="stretch",
+        )
+    with output:
+        # First in the report column, as in render_ct_tab: the overview and sample
+        # patch live in the inputs column, so nothing separates this from the text.
+        warn_if_truncated(result)
+        show_response(render_thought(result["raw"], result["is_thinking"]))
+
+
+def render_sidebar() -> None:
+    """App-level panel: what the app is, which model answers, what this Mac can take.
+
+    Global facts only, by design. The per-tab controls stay in each tab's inputs
+    column: ``st.tabs`` doesn't tell the server which tab is showing, so a sidebar
+    can't follow the active tab without ``on_change="rerun"`` plus hand-rolled
+    persistence for every hidden tab's widgets (Streamlit drops the state of a
+    widget that isn't rendered on a run).
+
+    The memory block reports what ``ram_aware_slice_cap`` decided, which before this
+    was surfaced only in a slider tooltip -- or, on a small Mac, as a bare "Limited
+    memory detected" caption with nothing saying what the limit was measured against.
+    """
+    # Local file, like page_icon: served from /media/, so no off-host request. When
+    # the sidebar is collapsed it stays in the header as the app's only mark.
+    st.logo(str(FAVICON_PATH), size="large")
+    with st.sidebar:
+        st.title("MedGemma Studio")
+        st.caption(
+            "Ask medical questions and analyze chest X-rays, CT series, and "
+            "whole-slide pathology images with Google MedGemma."
+        )
+
+        st.subheader("Model")
+        # A plain link, not a code span: linkUnderline = false in the theme, so the
+        # link color is the only cue, and inline-code styling overrode it.
+        st.markdown(f"[{MODEL_ID.split('/')[-1]}]({MODEL_CARD_URL})")
+        st.caption(
+            "Runs on this Mac through MLX: no image, scan, or slide leaves the "
+            "machine. Decoding is greedy (temperature 0), so the same inputs give the "
+            "same answer — rephrase the question rather than re-running it."
+        )
+
+        st.subheader("This Mac")
+        total_gib = _cached_total_ram_gib()
+        default_count, max_count = ram_aware_slice_cap(total_gib)
+        with st.container(horizontal=True):
+            st.metric("Memory", f"{total_gib:.0f} GiB")
+            st.metric(
+                "Per-run cap",
+                max_count,
+                help="The most CT slices or WSI patches a single run can analyze.",
+            )
+        if max_count > 2:
+            st.caption(
+                f"CT and pathology runs analyze up to {max_count} slices or patches "
+                f"(default {default_count}), sized to fit in memory beside the model."
+            )
+        else:
+            st.caption(
+                "Limited memory: CT and pathology runs analyze 2 slices or patches, "
+                "the floor below which multi-image inference would not fit."
+            )
+
+        st.caption(
+            "MedGemma is governed by Google's "
+            f"[Health AI Developer Foundations Terms of Use]({HAI_DEF_TERMS_URL})."
+        )
 
 
 def main():
-    st.title("MedGemma Studio")
+    render_sidebar()
+    # Above the tabs on every view, and in the main area rather than the sidebar: the
+    # sidebar collapses (and starts collapsed on a phone), and this notice must not.
     st.warning(DISCLAIMER_TEXT, icon=":material/warning:")
     model, processor, config = load_model()
     tab_ask, tab_cxr, tab_ct, tab_wsi = st.tabs(

@@ -9,6 +9,7 @@ import pytest
 import streamlit as st
 from PIL import Image
 from streamlit.testing.v1 import AppTest
+from streamlit.testing.v1.element_tree import Column
 
 from streamlit_app import (
     DEFAULT_INSTRUCTION_COMPARE,
@@ -16,6 +17,8 @@ from streamlit_app import (
     DEFAULT_INSTRUCTION_IMAGE,
     DEFAULT_INSTRUCTION_TEXT,
     DEFAULT_INSTRUCTION_WSI,
+    EMPTY_OUTPUT_HINT,
+    MODEL_CARD_URL,
     REPETITION_CONTEXT_SIZE,
     REPETITION_PENALTY,
 )
@@ -231,6 +234,44 @@ def _upload_slide(at, data=b"slide"):
     ).run()
 
 
+_TAB_INDEX = {"ask": 0, "cxr": 1, "ct": 2, "wsi": 3}
+
+
+def _tab(at, tab):
+    """One tab's block. Scope content lookups to it rather than the whole app: the
+    sidebar panel's captions say "whole-slide" and "Limited memory" too, and the CT
+    and WSI tabs share their "Limited memory detected" phrasing, so an app-wide
+    ``at.caption`` search passes on another element's text."""
+    return at.tabs[_TAB_INDEX[tab]]
+
+
+def _workspace(at, tab):
+    """A tab's ``(inputs, output)`` workspace columns, found by structure.
+
+    The workspace is the first block under the tab (pre-order) whose children are
+    all columns -- the ``st.columns`` row itself, so a pair nested inside the inputs
+    column (the CXR comparison) is never mistaken for it, and neither is a pair that
+    might one day nest in the output column. Weights can't tell them apart: at
+    ``WORKSPACE_SPEC = [1, 1]`` the workspace and any nested ``st.columns(2)`` are
+    both (0.5, 0.5).
+    """
+    for node in _tab(at, tab):
+        children = list(getattr(node, "children", {}).values())
+        if children and all(isinstance(c, Column) for c in children):
+            assert len(children) == 2, f"{tab} workspace has {len(children)} columns"
+            return children[0], children[1]
+    raise AssertionError(f"{tab} tab is no longer an inputs/output workspace")
+
+
+def _position(block, kind, match=lambda node: True):
+    """Document-order index of the first ``kind`` node under ``block`` (``Block``
+    iterates pre-order depth-first, i.e. in the order the elements render)."""
+    for i, node in enumerate(block):
+        if type(node).__name__ == kind and match(node):
+            return i
+    raise AssertionError(f"no {kind} under this block")
+
+
 # --------------------------------------------------------------------------- #
 # Layout / shared
 # --------------------------------------------------------------------------- #
@@ -238,7 +279,10 @@ def _upload_slide(at, data=b"slide"):
 
 def test_title_renders(app):
     assert not app.exception
-    assert app.title[0].value == "MedGemma Studio"
+    # In the sidebar app panel now -- moved, not duplicated, so the main area opens
+    # on the disclaimer and the tabs rather than spending a heading's height on it.
+    assert [t.value for t in app.sidebar.title] == ["MedGemma Studio"]
+    assert not app.main.title
 
 
 def test_in_app_disclaimer_renders(app):
@@ -247,10 +291,14 @@ def test_in_app_disclaimer_renders(app):
     # from silent removal, mirroring TestLicense's README-disclaimer guard.
     import streamlit_app
 
-    warnings = [w.value for w in app.warning]
+    # In the MAIN area specifically: the sidebar collapses, and starts collapsed on a
+    # phone, so a notice that migrated there with the rest of the app panel could
+    # render and still go unseen.
+    warnings = [w.value for w in app.main.warning]
     assert streamlit_app.DISCLAIMER_TEXT in warnings, (
         "in-app research-only disclaimer is missing from the top of the app"
     )
+    assert streamlit_app.DISCLAIMER_TEXT not in [w.value for w in app.sidebar.warning]
     low = streamlit_app.DISCLAIMER_TEXT.lower()
     assert "not a medical device" in low
     assert "not medical advice" in low
@@ -302,6 +350,208 @@ def test_thinking_toggles_are_independent(app):
     assert app.toggle(key="ask_thinking").value is True
     assert app.toggle(key="cxr_thinking").value is False
     assert app.toggle(key="ct_thinking").value is False
+
+
+# --------------------------------------------------------------------------- #
+# Workspace layout: sidebar app panel + per-tab inputs | output columns
+# --------------------------------------------------------------------------- #
+
+
+def test_page_uses_the_wide_layout():
+    # Each workspace column assumes the wide page. Under "centered" (~730px) each
+    # column would get ~340px and each study in the CXR comparison pair ~160px, and no
+    # AppTest assertion would notice: AppTest doesn't expose page config, so the
+    # call is read from source.
+    import ast
+
+    tree = ast.parse(Path(APP_PATH).read_text())
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", None) == "set_page_config"
+    ]
+    assert len(calls) == 1
+    layout = {kw.arg: kw.value for kw in calls[0].keywords}.get("layout")
+    assert isinstance(layout, ast.Constant) and layout.value == "wide"
+
+
+def test_sidebar_is_an_app_panel_without_controls(app):
+    assert any(MODEL_CARD_URL in m.value for m in app.sidebar.markdown)
+    # Global facts only. st.tabs doesn't tell the server which tab is showing, so a
+    # per-tab control moved into the sidebar either shows all four tabs' copies at
+    # once or needs on_change="rerun" plus hand-rolled persistence for the hidden
+    # ones -- the per-tab controls belong in each tab's inputs column.
+    for kind in (
+        "button",
+        "text_input",
+        "text_area",
+        "toggle",
+        "slider",
+        "file_uploader",
+        "segmented_control",
+    ):
+        assert not getattr(app.sidebar, kind), f"the sidebar grew a {kind}"
+
+
+@pytest.mark.parametrize(
+    ("gib", "cap", "caption"),
+    [
+        (32, "20", "up to 20 slices or patches (default 10)"),
+        (16, "2", "Limited memory"),
+    ],
+)
+def test_sidebar_reports_the_ram_derived_cap(
+    patched_mlx, monkeypatch, gib, cap, caption
+):
+    # The one place the cap is stated outright: before, a small Mac saw only a bare
+    # "Limited memory detected" caption in the CT/WSI tabs, with nothing naming the
+    # memory it was measured against.
+    _force_ram_gib(monkeypatch, gib)
+    at = _app_test().run()
+    assert not at.exception
+    assert {m.label: m.value for m in at.sidebar.metric} == {
+        "Memory": f"{gib} GiB",
+        "Per-run cap": cap,
+    }
+    assert any(caption in c.value for c in at.sidebar.caption)
+
+
+@pytest.mark.parametrize("tab", ["ask", "cxr", "ct", "wsi"])
+def test_each_tab_is_an_inputs_output_workspace(app, tab):
+    inputs, output = _workspace(app, tab)
+    assert [b.key for b in inputs.button] == [f"{tab}_run"]
+    assert [e.label for e in inputs.expander] == ["Model settings"]
+    # Before any run the output column says what will appear there: in the wide
+    # layout a blank right half reads as a broken page.
+    assert not output.button
+    assert [c.value for c in output.caption] == [EMPTY_OUTPUT_HINT]
+
+
+def test_ask_response_renders_beside_the_inputs(patched_mlx):
+    at = _app_test().run()
+    at.text_input(key="ask_prompt").set_value("Why?").run()
+    at.button(key="ask_run").click().run()
+    assert not at.exception
+    inputs, output = _workspace(at, "ask")
+    assert "### Response" in [m.value for m in output.markdown]
+    assert "### Response" not in [m.value for m in inputs.markdown]
+    assert EMPTY_OUTPUT_HINT not in [c.value for c in output.caption]
+
+
+def test_missing_question_warning_renders_under_run(app):
+    # Next to the button that raised it, not across the page in the output column.
+    app.button(key="ask_run").click().run()
+    inputs, output = _workspace(app, "ask")
+    assert "Enter a question first." in [w.value for w in inputs.warning]
+    assert not output.warning
+    # And not beside "the response appears here after you click Run" -- the user
+    # just did. empty_hint keys on the raw click, not on the run_requested gate.
+    assert EMPTY_OUTPUT_HINT not in [c.value for c in output.caption]
+
+
+def test_failed_run_shows_its_error_without_the_empty_hint(patched_mlx, monkeypatch):
+    # empty_hint=not go: an error followed by "the response appears here after you
+    # click Run" would contradict the click that just failed.
+    def _raise(*a, **k):
+        raise RuntimeError("model exploded")
+
+    _patch_stream(monkeypatch, _raise)
+    at = _app_test().run()
+    at.text_input(key="ask_prompt").set_value("Why?").run()
+    at.button(key="ask_run").click().run()
+    assert not at.exception
+    _, output = _workspace(at, "ask")
+    assert [e.value for e in output.error] == ["Inference failed: model exploded"]
+    assert EMPTY_OUTPUT_HINT not in [c.value for c in output.caption]
+
+
+def test_cxr_preview_renders_under_run_with_the_report_beside_it(
+    patched_mlx, png_bytes
+):
+    at = _app_test().run()
+    at.text_input(key="cxr_prompt").set_value("Describe.").run()
+    at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    at.button(key="cxr_run").click().run()
+    assert not at.exception
+    inputs, output = _workspace(at, "cxr")
+    assert [i.captions for i in inputs.image] == [["Uploaded image"]]
+    # Under Run, not above it: a portrait radiograph is taller than the viewport's
+    # spare height, so a preview above the button pushed Run off-screen as soon as a
+    # study was attached.
+    run_at = _position(inputs, "Button", lambda n: n.key == "cxr_run")
+    assert run_at < _position(inputs, "Image")
+    assert "### Response" in [m.value for m in output.markdown]
+    assert not output.image
+
+
+def test_cxr_localization_draws_in_the_output_column(patched_mlx, png_bytes):
+    # The annotated image IS the answer in this mode, so it goes where answers go;
+    # the unannotated study stays in the inputs column beside it for comparison.
+    patched_mlx.text = (
+        '```json\n[{"box_2d": [100, 100, 500, 500], "label": "right clavicle"}]\n```'
+    )
+    at = _app_test().run()
+    at.text_input(key="cxr_prompt").set_value("Where is the right clavicle?").run()
+    at.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
+    at.toggle(key="cxr_localize").set_value(True).run()
+    at.button(key="cxr_run").click().run()
+    assert not at.exception
+    inputs, output = _workspace(at, "cxr")
+    assert [i.captions for i in output.image] == [["Localized anatomy"]]
+    assert "### Detected structures" in [m.value for m in output.markdown]
+    assert [i.captions for i in inputs.image] == [["Uploaded image"]]
+
+
+def test_ct_slices_render_under_the_inputs_with_the_report_beside_them(
+    patched_mlx, monkeypatch
+):
+    # The imagery the model saw lives in the inputs column, so the report column
+    # opens directly on the truncation warning and the text it qualifies -- in the
+    # single-column layout a full-width slice plus the gallery sat between them.
+    _force_ram_gib(monkeypatch, 32)
+    out = MagicMock()
+    out.text = "Two contiguous slices of the liver."
+    out.finish_reason = "length"
+    _patch_stream(monkeypatch, lambda *a, **k: out)
+    at = _app_test().run()
+    at.text_input(key="ct_prompt").set_value("Any lesions?").run()
+    _upload_ct_pair(at)
+    at.button(key="ct_run").click().run()
+    assert not at.exception
+    inputs, output = _workspace(at, "ct")
+    assert [i.captions for i in inputs.image] == [["Sample windowed slice (1 of 2)"]]
+    assert [e.label for e in inputs.expander] == [
+        "Model settings",
+        "View all 2 windowed slices",
+    ]
+    assert not output.image
+    assert "Two contiguous slices of the liver." in [m.value for m in output.markdown]
+    assert _position(output, "Warning") < _position(output, "Markdown")
+    assert any("token limit" in w.value for w in output.warning)
+
+
+def test_wsi_overview_renders_under_the_inputs_with_the_report_beside_it(
+    patched_mlx, patched_openslide, monkeypatch
+):
+    _force_ram_gib(monkeypatch, 32)
+    out = MagicMock()
+    out.text = "Moderately differentiated adenocarcinoma."
+    _patch_stream(monkeypatch, lambda *a, **k: out)
+    at = _app_test().run()
+    at.text_input(key="wsi_prompt").set_value("Describe the slide").run()
+    _upload_slide(at)
+    at.button(key="wsi_run").click().run()
+    assert not at.exception
+    inputs, output = _workspace(at, "wsi")
+    captions = [i.captions[0] for i in inputs.image]
+    assert captions[0] == "Tissue overview"
+    assert captions[1].startswith("Sample patch (1 of ")
+    assert any("patches sampled at ~" in c.value for c in inputs.caption)
+    assert not output.image
+    assert "Moderately differentiated adenocarcinoma." in [
+        m.value for m in output.markdown
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -564,14 +814,15 @@ def test_cxr_localization_toggle_disabled_without_image(app):
 
 
 def test_cxr_localization_caption_discloses_override(app, png_bytes):
-    assert not any("ignored in this mode" in c.value for c in app.caption)
+    assert not any("ignored in this mode" in c.value for c in _tab(app, "cxr").caption)
     app.file_uploader(key="cxr_image1").upload("xray.png", png_bytes, "image/png").run()
     app.toggle(key="cxr_localize").set_value(True).run()
-    assert any("ignored in this mode" in c.value for c in app.caption)
+    assert any("ignored in this mode" in c.value for c in _tab(app, "cxr").caption)
     # Pin the direction word too: "Model settings" renders *below* this caption, so
     # a substring check on "ignored in this mode" alone would not notice the caption
     # pointing the wrong way after a reorder.
-    assert any("instruction below is ignored" in c.value for c in app.caption)
+    captions = [c.value for c in _tab(app, "cxr").caption]
+    assert any("instruction below is ignored" in c for c in captions)
 
 
 def test_cxr_second_uploader_appears_after_first_image(app, png_bytes):
@@ -597,20 +848,28 @@ def test_cxr_localization_disabled_with_two_images(app, png_bytes):
 
 
 def test_cxr_comparison_caption_disclosed(app, png_bytes):
-    assert not any("Comparison mode" in c.value for c in app.caption)
+    assert not any("Comparison mode" in c.value for c in _tab(app, "cxr").caption)
     app.file_uploader(key="cxr_image1").upload("a.png", png_bytes, "image/png").run()
     app.file_uploader(key="cxr_image2").upload("b.png", png_bytes, "image/png").run()
-    assert any("Comparison mode" in c.value for c in app.caption)
+    assert any("Comparison mode" in c.value for c in _tab(app, "cxr").caption)
 
 
 def test_cxr_comparison_previews_studies_side_by_side(app, png_bytes):
-    # A single image previews full-width (no columns); a second image switches to a
-    # side-by-side st.columns(2) layout so a longitudinal pair reads at a glance.
+    # A single image previews at the inputs column's full width (no nested columns);
+    # a second image switches to a side-by-side st.columns(2) pair so a longitudinal
+    # pair reads at a glance. Scoped to the inputs column: every tab is itself a
+    # two-column workspace now, so a bare `app.columns` is never empty.
+    # (A Column's .columns starts with the column itself -- Block.__iter__ yields
+    # self first -- so the nested pair is everything after index 0.)
     app.file_uploader(key="cxr_image1").upload("a.png", png_bytes, "image/png").run()
-    assert not app.columns
+    inputs, _ = _workspace(app, "cxr")
+    assert not inputs.columns[1:]
     app.file_uploader(key="cxr_image2").upload("b.png", png_bytes, "image/png").run()
     assert not app.exception
-    assert app.columns  # two studies laid out in columns
+    inputs, _ = _workspace(app, "cxr")
+    first, second = inputs.columns[1:]
+    assert [i.captions for i in first.image] == [["First image"]]
+    assert [i.captions for i in second.image] == [["Second image"]]
 
 
 def test_cxr_edit_then_upload_preserves_instruction(app, png_bytes):
@@ -851,7 +1110,7 @@ def test_cxr_invalid_second_image_falls_back_to_single_image_mode(app, png_bytes
         for e in app.error
     )
     assert app.text_area(key="cxr_instruction").value == DEFAULT_INSTRUCTION_IMAGE
-    assert not any("Comparison mode" in c.value for c in app.caption)
+    assert not any("Comparison mode" in c.value for c in _tab(app, "cxr").caption)
     assert app.toggle(key="cxr_localize").disabled is False  # one valid image
 
 
@@ -882,7 +1141,7 @@ def test_cxr_removing_first_image_collapses_second_slot(app, png_bytes):
     assert "cxr_image2" not in [w.key for w in app.file_uploader]
     # Untouched default reverts to the single-image persona (Ask owns text-only).
     assert app.text_area(key="cxr_instruction").value == DEFAULT_INSTRUCTION_IMAGE
-    assert not any("Comparison mode" in c.value for c in app.caption)
+    assert not any("Comparison mode" in c.value for c in _tab(app, "cxr").caption)
 
 
 def test_cxr_stale_localization_toggle_runs_comparison_with_two_images(
@@ -1039,14 +1298,14 @@ def test_ct_default_instruction_is_ct_persona(app):
 
 
 def test_ct_caption_describes_dicom_upload(app):
-    assert any("DICOM" in c.value for c in app.caption)
+    assert any("DICOM" in c.value for c in _tab(app, "ct").caption)
 
 
 def test_ct_slider_present_or_memory_capped(app):
     # The slice slider is RAM-aware; on a very low-memory host it collapses to a
     # fixed 2-slice cap with a caption instead.
     slider_present = "ct_slices" in [w.key for w in app.slider]
-    memory_capped = any("Limited memory" in c.value for c in app.caption)
+    memory_capped = any("Limited memory" in c.value for c in _tab(app, "ct").caption)
     assert slider_present or memory_capped
 
 
@@ -1183,7 +1442,7 @@ def test_ct_memory_capped_shows_caption_not_slider(patched_mlx, monkeypatch):
     _force_ram_gib(monkeypatch, 16)  # below base + headroom -> (2, 2): no slider
     at = _app_test().run()
     assert "ct_slices" not in [w.key for w in at.slider]
-    assert any("Limited memory" in c.value for c in at.caption)
+    assert any("Limited memory" in c.value for c in _tab(at, "ct").caption)
 
 
 def test_ct_rejects_mixed_series_with_error(patched_mlx):
@@ -1346,7 +1605,7 @@ def test_wsi_default_instruction_is_pathology_persona(app):
 
 
 def test_wsi_caption_describes_slide_upload(app):
-    assert any("whole-slide" in c.value for c in app.caption)
+    assert any("whole-slide" in c.value for c in _tab(app, "wsi").caption)
 
 
 def test_wsi_run_requires_prompt_and_file(app):
@@ -1445,7 +1704,7 @@ def test_wsi_caption_discloses_actual_magnification(
     at.button(key="wsi_run").click().run()
     assert not at.exception
     # A 10x request on a single-level 40x slide is honestly disclosed as ~40x.
-    assert any("sampled at ~40.0x" in c.value for c in at.caption)
+    assert any("sampled at ~40.0x" in c.value for c in _tab(at, "wsi").caption)
 
 
 def test_wsi_with_thinking_uses_larger_budget(
@@ -1520,7 +1779,7 @@ def test_wsi_magnification_selects_pyramid_level(patched_mlx, monkeypatch):
     at.segmented_control(key="wsi_mag").set_value(10).run()
     at.button(key="wsi_run").click().run()
     assert not at.exception
-    assert any("~10.0x" in c.value for c in at.caption)
+    assert any("~10.0x" in c.value for c in _tab(at, "wsi").caption)
 
 
 def test_wsi_sparse_tissue_reduces_patch_count(patched_mlx, monkeypatch):
@@ -1549,7 +1808,7 @@ def test_wsi_sparse_tissue_reduces_patch_count(patched_mlx, monkeypatch):
     at.button(key="wsi_run").click().run()
     assert not at.exception
     assert captured["act_kwargs"]["num_images"] == 3
-    assert any("3 patches sampled" in c.value for c in at.caption)
+    assert any("3 patches sampled" in c.value for c in _tab(at, "wsi").caption)
 
 
 def test_wsi_result_persists_across_rerun(patched_mlx, patched_openslide, monkeypatch):
@@ -1571,7 +1830,7 @@ def test_wsi_result_persists_across_rerun(patched_mlx, patched_openslide, monkey
     assert not at.exception
     assert overview in [m.value for m in at.markdown]
     # The tissue-overview + magnification caption persist too.
-    assert any("patches sampled at ~" in c.value for c in at.caption)
+    assert any("patches sampled at ~" in c.value for c in _tab(at, "wsi").caption)
     assert len(calls) == 1  # served from session_state, not recomputed
 
 
@@ -1594,7 +1853,7 @@ def test_wsi_stale_result_cleared_when_magnification_changes(
     ).run()  # default 10 -> 40, no re-run
     assert not at.exception
     assert "Adenocarcinoma." not in [m.value for m in at.markdown]
-    assert not any("patches sampled at ~" in c.value for c in at.caption)
+    assert not any("patches sampled at ~" in c.value for c in _tab(at, "wsi").caption)
 
 
 def test_wsi_stale_result_cleared_when_patch_count_changes(
