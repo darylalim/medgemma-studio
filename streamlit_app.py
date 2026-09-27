@@ -1663,9 +1663,13 @@ def render_sidebar() -> None:
                 "the floor below which multi-image inference would not fit."
             )
 
-        st.caption(
-            "MedGemma is governed by Google's "
-            f"[Health AI Developer Foundations Terms of Use]({HAI_DEF_TERMS_URL})."
+        # Small gray markdown, not st.caption: a caption is painted at 60% opacity,
+        # link included, which faded the light-mode link to ~2.6:1. The sidebar's
+        # grayTextColor is the caption's own painted color, so this still reads as
+        # one, while the link keeps its full linkColor.
+        st.markdown(
+            ":small[:gray[MedGemma is governed by Google's "
+            f"[Health AI Developer Foundations Terms of Use]({HAI_DEF_TERMS_URL}).]]"
         )
 
 

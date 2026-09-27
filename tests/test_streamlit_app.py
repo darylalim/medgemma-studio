@@ -1399,15 +1399,6 @@ class TestThemeConfig:
             assert _wcag_contrast("#ffffff", m["primaryColor"]) >= 4.5, (
                 f"{mode} Run label"
             )
-        # The sidebar's Terms of Use link sits inside an st.caption, faded to 60%
-        # along with it. Dark's pale-aqua linkColor exists to clear 4.5:1 through that
-        # fade; in light mode no tint short of near-black can (the config documents
-        # the ~2.6:1 gap), so only dark is pinned.
-        dark = theme["dark"]
-        panel = self._panel(dark)
-        dark_link = {**dark, **dark.get("sidebar", {})}["linkColor"]
-        faded = _blend(dark_link, panel, self.CAPTION_OPACITY)
-        assert _wcag_contrast(faded, panel) >= 4.5, "dark Terms link, faded in caption"
         # The theme's one accepted trade-off, pinned where it's resolvable: the
         # selected tab label, slider value and selected segment label are TEXT in
         # primaryColor. In dark mode no primary dark enough for the white Run label
@@ -1421,9 +1412,8 @@ class TestThemeConfig:
 
     def test_links_are_underlined_on_every_surface(self):
         # The underline is the link cue: dark mode has no tint that clears both 4.5:1
-        # on the surface and 3:1 against body text, and the sidebar's Terms link sits
-        # in a 60%-opacity caption that fades light mode's tint to ~2.6:1. linkUnderline
-        # layers like every theme key -- [theme] < [theme.<mode>] for the main area,
+        # on the surface and 3:1 against body text. linkUnderline layers like every
+        # theme key -- [theme] < [theme.<mode>] for the main area,
         # then [theme.sidebar] < [theme.<mode>.sidebar] for the panel -- so pin the
         # EFFECTIVE value per surface: an override anywhere would silently drop it.
         theme = self._theme()
@@ -1438,6 +1428,37 @@ class TestThemeConfig:
             assert panel.get("linkUnderline") is True, (
                 f"{mode} sidebar links (the Terms link) lost the underline"
             )
+
+    def test_no_link_sits_inside_a_caption(self):
+        # st.caption paints its whole element at 60% opacity, link included, which
+        # fades any light-mode link tint short of near-black below 4.5:1 -- the Terms
+        # of Use link sat at ~2.6:1 there. Links go in markdown instead (the Terms
+        # line is small :gray[] markdown). Checked on the source, so a future caption
+        # that grows a [label](url) fails here rather than in a contrast audit.
+        for call in _calls_to("st.caption"):
+            text = " ".join(ast.unparse(arg) for arg in call.args)
+            assert not re.search(r"\]\(", text), (
+                f"st.caption at line {call.lineno} carries a markdown link, which "
+                "its 60% opacity fades below 4.5:1; use small :gray[] markdown"
+            )
+
+    def test_sidebar_gray_text_matches_a_caption(self):
+        # The Terms line is :gray[] markdown standing in for a caption, so each
+        # sidebar's grayTextColor is set to the exact color a caption paints there
+        # (textColor at 60% over the panel): it reads as the captions above it, and
+        # inherits their 4.5:1 floor. Derived rather than eyeballed, so retuning
+        # textColor without it would fail here instead of drifting.
+        theme = self._theme()
+        for mode in self.MODES:
+            m = theme[mode]
+            panel = self._panel(m)
+            text = {**m, **m.get("sidebar", {})}["textColor"]
+            gray = m.get("sidebar", {}).get("grayTextColor")
+            assert gray == _blend(text, panel, self.CAPTION_OPACITY), (
+                f"[theme.{mode}.sidebar] grayTextColor {gray} is not the caption "
+                f"color {_blend(text, panel, self.CAPTION_OPACITY)}"
+            )
+            assert _wcag_contrast(gray, panel) >= 4.5, mode
 
     def test_loads_no_external_assets(self):
         # Inference is fully on-device, so the theme must not be what puts a request
@@ -1527,7 +1548,7 @@ class TestFaviconAsset:
         )
         # The same file is the st.logo mark, drawn on the sidebar of whichever mode is
         # showing -- so the glyph must clear 3:1 (WCAG non-text) on the light AND dark
-        # panel. The dark mode's pale link tint fails that on light (~1.3:1) and the
+        # panel. The dark mode's light link tint fails that on light (~1.7:1) and the
         # light primary fails it on dark (~2.7:1); the dark primary passes but leans
         # light-side (4.1:1 on light, 3.5:1 on dark). The glyph sits at the lightness
         # where the two panels' contrasts meet, ~3.8:1 on each.

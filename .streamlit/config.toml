@@ -84,11 +84,11 @@ maxUploadSize = 2000
 #   color.)
 # - linkUnderline = true: in dark mode no link tint that clears 4.5:1 on the surfaces
 #   also clears the 3:1 against body text a color-only link cue needs, so the
-#   underline is the cue. The sidebar's Terms of Use link also sits inside an
-#   st.caption, whose 60% opacity fades the tint: dark's linkColor is a pale aqua
-#   (#82dfea) precisely so it still clears 4.5:1 faded (4.9 canvas / 4.7 sidebar).
-#   In light mode no tint short of near-black survives the fade (the link lands
-#   ~2.6:1) -- a known gap that only moving the link out of the caption fixes.
+#   underline is the cue in both modes. No link sits inside an st.caption: its 60%
+#   opacity fades the link along with the text (light's tint would land ~2.6:1), so
+#   the sidebar's Terms line is small :gray[] markdown instead -- the link keeps its
+#   full linkColor -- and each [theme.<mode>.sidebar] grayTextColor is set to the
+#   exact color a caption paints on that panel, so the line still reads as one.
 #
 # Defining EITHER [theme.light] or [theme.dark] makes Streamlit offer the System /
 # Light / Dark switch in the app menu (⋮), following the OS appearance until the
@@ -126,7 +126,7 @@ secondaryBackgroundColor = "#22252a"
 codeBackgroundColor = "#22252a"
 textColor = "#e4e6e9"
 codeTextColor = "#c9cdd3"
-linkColor = "#82dfea"
+linkColor = "#5ecad6"
 borderColor = "#434850"
 redColor = "#eb827b"
 orangeColor = "#e28d4f"
@@ -141,6 +141,7 @@ chartCategoricalColors = ["#5ecad6", "#60aaf3", "#62bb78", "#edb345", "#e28d4f",
 # canvas, with showSidebarBorder above drawing the dividing rule.
 [theme.dark.sidebar]
 backgroundColor = "#1d2024"
+grayTextColor = "#94979a"
 secondaryBackgroundColor = "#2a2e33"
 codeBackgroundColor = "#2a2e33"
 borderColor = "#434850"
@@ -170,6 +171,7 @@ chartCategoricalColors = ["#0f6d76", "#1f74bf", "#33854a", "#b37903", "#b75f0b",
 # The app panel, one step darker than the canvas.
 [theme.light.sidebar]
 backgroundColor = "#eef0f2"
+grayTextColor = "#6a6d6f"
 secondaryBackgroundColor = "#e2e5e9"
 codeBackgroundColor = "#e2e5e9"
 borderColor = "#c5cad1"
